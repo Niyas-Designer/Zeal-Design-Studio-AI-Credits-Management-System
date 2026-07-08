@@ -1,0 +1,1736 @@
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  AlertTriangle,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  Coins,
+  CreditCard,
+  Download,
+  FileText,
+  FileUp,
+  ImageIcon,
+  Layers,
+  LayoutDashboard,
+  ListChecks,
+  Lock,
+  LogOut,
+  Mail,
+  Moon,
+  Eye,
+  EyeOff,
+  PiggyBank,
+  Plus,
+  Search,
+  Sparkles,
+  Star,
+  Sun,
+  Table2,
+  TrendingDown,
+  UserPlus,
+  Wallet
+} from "lucide-react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { ToastProvider, useToast } from "@/components/ui/toast";
+import { DailyActivityChart, MonthlyUsageChart, PlatformChart, ProductivityChart } from "@/components/dashboard/charts";
+import { KpiCard } from "@/components/dashboard/kpi-card";
+import { RecentActivity } from "@/components/dashboard/recent-activity";
+import { AiStudioPage } from "@/components/ai-studio/ai-studio-page";
+import { ReportsDashboard } from "@/components/reports/reports-dashboard";
+import { getCategorySeries, getDailyActivity, getDashboardStats, getMonthlySeries, getPlatformSeries, getSupplierUsage } from "@/lib/analytics";
+import {
+  deletePayment,
+  deletePurchase,
+  deleteUsage,
+  getPayments,
+  getPurchases,
+  getUsage,
+  getUsageCategories,
+  getUsers,
+  onAuthChange,
+  savePayment,
+  savePurchase,
+  saveUsage,
+  saveUsageCategory,
+  setUserDisabled,
+  simulatePasswordReset,
+  signIn,
+  signInWithGoogle,
+  signOut,
+  signUp,
+  updateUserRole
+} from "@/lib/data-store";
+import { PLATFORMS, SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
+import type { AiUsage, CreditPurchase, InvoiceFile, Payment, PaymentMethod, PaymentStatus, Platform, Profile } from "@/lib/types";
+import {
+  aiUsageSchema,
+  forgotPasswordSchema,
+  loginSchema,
+  paymentSchema,
+  purchaseSchema,
+  signupSchema,
+  type AiUsageFormValues,
+  type PaymentFormValues,
+  type PurchaseFormValues
+} from "@/lib/validation";
+import { cn, formatDate, formatNumber } from "@/lib/utils";
+import type { z } from "zod";
+
+type View = "dashboard" | "studio" | "usage" | "purchases" | "reports" | "payments" | "users";
+
+const FULL_LOGO = "/logo-full.png";
+const MARK_LOGO = "/favicon.png";
+const APPLE_LOGO = "/apple-logo-black.svg";
+const IMAGES_PER_STYLE = 6;
+const CREDITS_PER_IMAGE = 150;
+const DEFAULT_PLATFORM_CREDIT_PACKS: Partial<Record<Platform, number>> = {
+  Freepik: 45000
+};
+
+const FASHION_SLIDES = [
+  {
+    title: "Women's Fashion",
+    subtitle: "Premium studio editorials for modern womenswear campaigns.",
+    image: "/fashion-slides/womens-fashion.png",
+    position: "center top"
+  },
+  {
+    title: "Men's Fashion",
+    subtitle: "Luxury streetwear and tailored menswear photography at scale.",
+    image: "/fashion-slides/mens-fashion.png",
+    position: "center top"
+  },
+  {
+    title: "Kids Fashion Collection",
+    subtitle: "Bright lifestyle images for premium children's apparel.",
+    image: "/fashion-slides/kids-collection.png",
+    position: "center top"
+  },
+  {
+    title: "Baby Apparel",
+    subtitle: "Soft natural-light visuals for infant collections and baby products.",
+    image: "/fashion-slides/baby-apparel.png",
+    position: "center top"
+  },
+  {
+    title: "Sportswear",
+    subtitle: "Sharp activewear imagery for performance and lifestyle brands.",
+    image: "/fashion-slides/sportswear.png",
+    position: "center top"
+  },
+  {
+    title: "Accessories",
+    subtitle: "Editorial product photography for bags, jewelry, and styling pieces.",
+    image: "/fashion-slides/accessories.png",
+    position: "center"
+  },
+  {
+    title: "Innerwear",
+    subtitle: "Tasteful premium visuals for refined innerwear and loungewear.",
+    image: "/fashion-slides/innerwear.png",
+    position: "center top"
+  }
+];
+
+function AppInner() {
+  const { toast } = useToast();
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<View>("dashboard");
+  const [dark, setDark] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    const unsubscribe = onAuthChange((nextProfile) => {
+      if (!mounted) return;
+      setProfile(nextProfile);
+      setLoading(false);
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", dark);
+  }, [dark]);
+
+  async function handleLogout() {
+    await signOut();
+    setProfile(null);
+    setView("dashboard");
+    toast({ title: "Logout Successful", description: "You have been signed out securely." });
+  }
+
+  if (loading) return <AppLoader />;
+  if (!profile) {
+    return <AuthScreen onSignedIn={setProfile} />;
+  }
+
+  const admin = profile.role === "admin";
+
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="flex">
+        <aside className="no-print sticky top-0 hidden h-screen w-72 shrink-0 border-r bg-card lg:flex lg:flex-col">
+          <div className="flex h-20 items-center gap-3 border-b px-5">
+            <img src={MARK_LOGO} alt="Zeal Design Studio" className="h-11 w-11 rounded-md object-contain" />
+            <div>
+              <p className="text-sm font-bold">Zeal Design Studio</p>
+              <p className="text-xs text-muted-foreground">AI Credits</p>
+            </div>
+          </div>
+          <nav className="flex-1 space-y-1 p-3">
+            <NavButton view="dashboard" active={view} setView={setView} icon={LayoutDashboard} label="Dashboard" />
+            <NavButton view="studio" active={view} setView={setView} icon={Sparkles} label="AI Studio" />
+            <NavButton view="usage" active={view} setView={setView} icon={Table2} label="AI Usage" />
+            <NavButton view="purchases" active={view} setView={setView} icon={FileUp} label="Purchase Credits" />
+            <NavButton view="reports" active={view} setView={setView} icon={FileText} label="Reports" />
+            <NavButton view="payments" active={view} setView={setView} icon={CreditCard} label="Payments" />
+            {admin ? <NavButton view="users" active={view} setView={setView} icon={UserPlus} label="Users" /> : null}
+          </nav>
+          <div className="border-t p-4">
+            <div className="mb-3 rounded-md bg-muted p-3">
+              <p className="truncate text-sm font-semibold">{profile.full_name || profile.email}</p>
+              <p className="text-xs capitalize text-muted-foreground">{profile.role}</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="outline" onClick={() => setDark((value) => !value)}>
+                {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+                Theme
+              </Button>
+              <Button variant="outline" onClick={handleLogout}>
+                <LogOut className="h-4 w-4" />
+                Logout
+              </Button>
+            </div>
+          </div>
+        </aside>
+
+        <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-8">
+          <div className="no-print mb-4 flex gap-2 overflow-x-auto lg:hidden">
+            {(["dashboard", "studio", "usage", "purchases", "reports", "payments"] as View[]).map((item) => (
+              <Button key={item} variant={view === item ? "default" : "outline"} onClick={() => setView(item)}>
+                {item}
+              </Button>
+            ))}
+            {admin ? (
+              <Button variant={view === "users" ? "default" : "outline"} onClick={() => setView("users")}>
+                users
+              </Button>
+            ) : null}
+            <Button variant="outline" onClick={handleLogout}>
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
+          {view === "dashboard" ? <DashboardPage profile={profile} /> : null}
+          {view === "studio" ? <AiStudioPage profile={profile} /> : null}
+          {view === "usage" ? <UsagePage profile={profile} /> : null}
+          {view === "purchases" ? <PurchaseCreditsPage profile={profile} /> : null}
+          {view === "reports" ? <ReportsPage profile={profile} /> : null}
+          {view === "payments" ? <PaymentsPage profile={profile} /> : null}
+          {view === "users" && admin ? <UsersPage currentUser={profile} /> : null}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export function App() {
+  return (
+    <ToastProvider>
+      <AppInner />
+    </ToastProvider>
+  );
+}
+
+function AuthScreen({ onSignedIn }: { onSignedIn: (profile: Profile) => void }) {
+  const [slide, setSlide] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [dragStart, setDragStart] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (paused) return;
+    const timer = window.setInterval(() => {
+      setSlide((current) => (current + 1) % FASHION_SLIDES.length);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [paused]);
+
+  function previousSlide() {
+    setSlide((current) => (current - 1 + FASHION_SLIDES.length) % FASHION_SLIDES.length);
+  }
+
+  function nextSlide() {
+    setSlide((current) => (current + 1) % FASHION_SLIDES.length);
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === "ArrowLeft") previousSlide();
+    if (event.key === "ArrowRight") nextSlide();
+  }
+
+  function handlePointerUp(clientX: number) {
+    if (dragStart == null) return;
+    const delta = clientX - dragStart;
+    if (Math.abs(delta) > 48) {
+      if (delta > 0) previousSlide();
+      else nextSlide();
+    }
+    setDragStart(null);
+  }
+
+  return (
+    <main className="min-h-screen bg-[#F7F7F7] px-4 py-5 text-[#111111] sm:px-8 sm:py-8 lg:px-10">
+      <div className="mx-auto grid min-h-[calc(100vh-4rem)] w-full max-w-[1440px] grid-cols-1 gap-8 rounded-[32px] bg-white p-6 shadow-2xl shadow-black/[0.06] sm:p-10 lg:grid-cols-12 lg:gap-12 lg:p-12 xl:p-[56px]">
+        <section className="flex min-h-[560px] flex-col bg-white lg:col-span-5 xl:col-span-5">
+          <img src={FULL_LOGO} alt="Zeal Design Studio" className="h-12 w-fit object-contain" />
+
+          <div className="flex flex-1 items-center py-10 lg:py-0">
+            <div className="w-full max-w-[420px] animate-in fade-in slide-in-from-bottom-4 duration-300">
+              <h1 className="text-[34px] font-bold leading-[1.05] tracking-tight text-[#111111] sm:text-[42px] xl:text-[56px]">
+                Welcome Back
+              </h1>
+              <p className="mt-4 max-w-[420px] text-base leading-7 text-[#666666]">
+                Sign in to access your AI Fashion Photoshoot Dashboard.
+              </p>
+              <div className="mt-10">
+                <LoginForm onSignedIn={onSignedIn} />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section className="lg:col-span-7 xl:col-span-7">
+          <div
+            aria-label="AI fashion campaign image slider"
+            className="relative h-[540px] overflow-hidden rounded-[32px] bg-[#111111] shadow-2xl shadow-black/20 outline-none sm:h-[620px] lg:h-full lg:min-h-[720px]"
+            onFocus={() => setPaused(true)}
+            onKeyDown={handleKeyDown}
+            onMouseEnter={() => setPaused(true)}
+            onMouseLeave={() => setPaused(false)}
+            onPointerDown={(event) => setDragStart(event.clientX)}
+            onPointerUp={(event) => handlePointerUp(event.clientX)}
+            tabIndex={0}
+          >
+            {FASHION_SLIDES.map((item, index) => (
+              <img
+                alt={`${item.title} AI fashion photoshoot campaign`}
+                aria-hidden={slide !== index}
+                className={cn("fashion-slide absolute inset-0 h-full w-full scale-100 object-cover opacity-0", slide === index && "scale-[1.04] opacity-100")}
+                decoding={index === 0 ? "sync" : "async"}
+                key={item.title}
+                loading={index === 0 ? "eager" : "lazy"}
+                src={item.image}
+                style={{ objectPosition: item.position }}
+              />
+            ))}
+
+            <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(0,0,0,.45),rgba(0,0,0,.15))]" />
+            <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/55 via-black/10 to-transparent" />
+
+            <div className="relative z-10 flex h-full flex-col justify-between p-6 text-white sm:p-8 lg:p-10 xl:p-12">
+              <div className="flex items-start justify-between gap-4">
+                <div className="rounded-full border border-white/25 bg-white/14 px-4 py-2 text-xs font-semibold tracking-[0.16em] text-white/90 backdrop-blur-md">
+                  AI Fashion Photoshoot Platform
+                </div>
+                <div className="hidden items-center gap-1 rounded-full border border-white/25 bg-white/14 px-4 py-2 text-sm font-semibold backdrop-blur-md sm:flex">
+                  {Array.from({ length: 5 }).map((_, index) => (
+                    <Star className="h-3.5 w-3.5 fill-[#E10600] text-[#E10600]" key={index} />
+                  ))}
+                  <span className="ml-1">4.9/5</span>
+                </div>
+              </div>
+
+              <div className="max-w-xl animate-in fade-in slide-in-from-bottom-3 duration-300">
+                <h2 className="max-w-lg text-4xl font-bold leading-tight tracking-tight sm:text-5xl xl:text-[60px]">
+                  {FASHION_SLIDES[slide].title}
+                </h2>
+                <p className="mt-4 max-w-[520px] text-base leading-7 text-white/82">
+                  {FASHION_SLIDES[slide].subtitle}
+                </p>
+                <div className="mt-7 flex flex-wrap gap-3">
+                  <Button className="h-12 rounded-full bg-[#E10600] px-6 text-white hover:scale-[1.03] hover:bg-[#C70000]">
+                    Generate Photos
+                  </Button>
+                  <Button className="h-12 rounded-full border-white/30 bg-white/14 px-6 text-white backdrop-blur hover:scale-[1.03] hover:bg-white/25" variant="outline">
+                    Explore Gallery
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="flex gap-2">
+                  {FASHION_SLIDES.map((item, index) => (
+                    <button
+                      aria-label={`Show ${item.title}`}
+                      aria-current={slide === index ? "true" : undefined}
+                      className={cn("h-2 rounded-full bg-white/40 transition-all focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white", slide === index ? "w-9 bg-[#E10600]" : "w-4 hover:bg-white/75")}
+                      key={item.title}
+                      onClick={() => setSlide(index)}
+                      type="button"
+                    />
+                  ))}
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    aria-label="Previous slide"
+                    className="grid h-12 w-12 place-items-center rounded-full border border-white/25 bg-white/14 text-white backdrop-blur-xl transition hover:scale-[1.03] hover:bg-white/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+                    onClick={previousSlide}
+                    type="button"
+                  >
+                    <ChevronLeft className="h-5 w-5" />
+                  </button>
+                  <button
+                    aria-label="Next slide"
+                    className="grid h-12 w-12 place-items-center rounded-full border border-white/25 bg-white/14 text-white backdrop-blur-xl transition hover:scale-[1.03] hover:bg-white/25 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white"
+                    onClick={nextSlide}
+                    type="button"
+                  >
+                    <ChevronRight className="h-5 w-5" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function LoginForm({ onSignedIn }: { onSignedIn: (profile: Profile) => void }) {
+  const { toast } = useToast();
+  const [forgotOpen, setForgotOpen] = useState(false);
+  const [signupOpen, setSignupOpen] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
+  const [shake, setShake] = useState(false);
+  const [remember, setRemember] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const form = useForm<z.infer<typeof loginSchema>>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: "", password: "" }
+  });
+  const forgotForm = useForm<z.infer<typeof forgotPasswordSchema>>({
+    resolver: zodResolver(forgotPasswordSchema),
+    defaultValues: { email: "" }
+  });
+
+  async function onSubmit(values: z.infer<typeof loginSchema>) {
+    try {
+      const profile = await signIn(values.email, values.password, remember);
+      toast({ title: "Login Successful", description: "Welcome back." });
+      onSignedIn(profile);
+    } catch (error) {
+      setShake(true);
+      window.setTimeout(() => setShake(false), 450);
+      toast({
+        title: "Login failed",
+        description: error instanceof Error ? error.message : "Unable to login.",
+        variant: "destructive"
+      });
+    }
+  }
+
+  async function onForgot(values: z.infer<typeof forgotPasswordSchema>) {
+    try {
+      await simulatePasswordReset(values.email);
+      forgotForm.reset();
+      setForgotOpen(false);
+      toast({
+        title: "Password Reset Email Sent",
+        description: "Check your inbox to continue securely."
+      });
+    } catch (error) {
+      toast({
+        title: "Reset failed",
+        description: error instanceof Error ? error.message : "Unable to process reset.",
+        variant: "destructive"
+      });
+    }
+  }
+
+  async function onGoogle() {
+    try {
+      setGoogleLoading(true);
+      const profile = await signInWithGoogle(remember);
+      toast({ title: "Login Successful", description: "Signed in with Google." });
+      onSignedIn(profile);
+    } catch (error) {
+      toast({
+        title: "Google sign in failed",
+        description: error instanceof Error ? error.message : "Unable to start sign in.",
+        variant: "destructive"
+      });
+    } finally {
+      setGoogleLoading(false);
+    }
+  }
+
+  function onProviderUnavailable(provider: string) {
+    toast({
+      title: `${provider} sign in is not enabled`,
+      description: "Google authentication is ready. Add this provider in Firebase to activate it."
+    });
+  }
+
+  return (
+    <>
+      <form className={cn("space-y-6", shake && "animate-shake")} onSubmit={form.handleSubmit(onSubmit)} noValidate>
+        <Field label="Email Address" error={form.formState.errors.email?.message}>
+          <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white px-[18px] text-[#111111] placeholder:text-[#9CA3AF] transition focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25 focus-visible:ring-offset-0" type="email" autoComplete="email" placeholder="name@company.com" {...form.register("email")} />
+        </Field>
+        <Field label="Password" error={form.formState.errors.password?.message}>
+          <div className="relative">
+            <Input
+              className="h-14 rounded-[14px] border-[#E5E5E5] bg-white px-[18px] pr-12 text-[#111111] placeholder:text-[#9CA3AF] transition focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25 focus-visible:ring-offset-0"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              placeholder="Enter your password"
+              onKeyUp={(event) => setCapsLock(event.getModifierState("CapsLock"))}
+              {...form.register("password")}
+            />
+            <button
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              className="absolute right-4 top-1/2 -translate-y-1/2 rounded-md text-[#666666] transition hover:text-[#111111] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]"
+              onClick={() => setShowPassword((value) => !value)}
+              type="button"
+            >
+              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
+          {capsLock ? (
+            <p className="mt-2 flex items-center gap-2 text-xs font-medium text-[#B45309]">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              Caps Lock is on
+            </p>
+          ) : null}
+        </Field>
+        <div className="flex items-center justify-between gap-4 text-sm leading-none">
+          <label className="flex cursor-pointer items-center gap-2 text-[#666666]">
+            <input
+              checked={remember}
+              className="h-4 w-4 rounded border-[#E5E5E5] accent-[#E10600]"
+              onChange={(event) => setRemember(event.target.checked)}
+              type="checkbox"
+            />
+            Remember Me
+          </label>
+          <button className="font-semibold text-[#E10600] transition hover:text-[#111111] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]" onClick={() => setForgotOpen(true)} type="button">
+            Forgot Password
+          </button>
+        </div>
+        <Button className="h-14 w-full rounded-[14px] bg-[#E10600] font-bold text-white shadow-lg shadow-red-100 transition duration-300 hover:scale-[1.03] hover:bg-[#C70000] hover:shadow-xl hover:shadow-red-100 active:scale-[0.98]" disabled={form.formState.isSubmitting}>
+          {form.formState.isSubmitting ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <Lock className="h-4 w-4" />}
+          Sign In
+        </Button>
+
+        <div className="flex items-center gap-4 pt-1">
+          <span className="h-px flex-1 bg-gradient-to-r from-transparent to-[#E5E5E5]" />
+          <span className="whitespace-nowrap text-[11px] font-medium text-[#9CA3AF]">or continue with</span>
+          <span className="h-px flex-1 bg-gradient-to-l from-transparent to-[#E5E5E5]" />
+        </div>
+
+        <div className="flex items-center justify-center gap-5">
+          <SocialIconButton
+            ariaLabel="Continue with Google"
+            disabled={form.formState.isSubmitting || googleLoading}
+            icon={googleLoading ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E10600]/20 border-t-[#E10600]" /> : <GoogleIcon />}
+            onClick={onGoogle}
+          />
+          <SocialIconButton
+            ariaLabel="Continue with Apple"
+            featured
+            icon={<img alt="" className="h-5 w-5 object-contain" src={APPLE_LOGO} />}
+            onClick={() => onProviderUnavailable("Apple")}
+          />
+          <SocialIconButton
+            ariaLabel="Continue with Facebook"
+            icon={<FacebookIcon />}
+            onClick={() => onProviderUnavailable("Facebook")}
+          />
+        </div>
+
+        <p className="pt-2 text-center text-sm text-[#6f6f6f]">
+          Don't have an account?{" "}
+          <button className="font-bold text-[#E10600] transition hover:text-[#111111] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]" onClick={() => setSignupOpen(true)} type="button">
+            Create Account
+          </button>
+        </p>
+        <p className="text-center text-xs text-[#8a8a8a]">Secure authentication powered by Firebase.</p>
+      </form>
+
+      <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
+        <DialogContent className="border-[#EAEAEA] bg-white text-[#111111]">
+          <DialogHeader>
+            <DialogTitle>Forgot Password</DialogTitle>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={forgotForm.handleSubmit(onForgot)}>
+            <Field label="Email Address" error={forgotForm.formState.errors.email?.message}>
+              <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="email" placeholder="name@company.com" {...forgotForm.register("email")} />
+            </Field>
+            <div className="flex justify-end gap-2">
+              <DialogClose asChild>
+                <Button type="button" variant="outline">Cancel</Button>
+              </DialogClose>
+              <Button disabled={forgotForm.formState.isSubmitting}>
+                <Mail className="h-4 w-4" />
+                Send Reset Link
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <SignupDialog open={signupOpen} onOpenChange={setSignupOpen} onSignedIn={onSignedIn} remember={remember} />
+    </>
+  );
+}
+
+function SignupDialog({
+  open,
+  onOpenChange,
+  onSignedIn,
+  remember
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSignedIn: (profile: Profile) => void;
+  remember: boolean;
+}) {
+  const { toast } = useToast();
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const form = useForm<z.infer<typeof signupSchema>>({
+    resolver: zodResolver(signupSchema),
+    defaultValues: { full_name: "", email: "", password: "", confirm_password: "" }
+  });
+
+  async function onSubmit(values: z.infer<typeof signupSchema>) {
+    try {
+      await signUp(values.email, values.password, values.full_name);
+      form.reset();
+      onOpenChange(false);
+      toast({
+        title: "Account Created Successfully",
+        description: "A verification email has been sent. Verify your email, then sign in."
+      });
+    } catch (error) {
+      toast({
+        title: "Create account failed",
+        description: error instanceof Error ? error.message : "Unable to create account.",
+        variant: "destructive"
+      });
+    }
+  }
+
+  async function onGoogle() {
+    try {
+      setGoogleLoading(true);
+      const profile = await signInWithGoogle(remember);
+      onOpenChange(false);
+      toast({ title: "Account Created Successfully", description: "Signed in with Google." });
+      onSignedIn(profile);
+    } catch (error) {
+      toast({
+        title: "Google sign in failed",
+        description: error instanceof Error ? error.message : "Unable to continue with Google.",
+        variant: "destructive"
+      });
+    } finally {
+      setGoogleLoading(false);
+    }
+  }
+
+  function onProviderUnavailable(provider: string) {
+    toast({
+      title: `${provider} sign in is not enabled`,
+      description: "Google authentication is ready. Add this provider in Firebase to activate it."
+    });
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="border-[#EAEAEA] bg-white text-[#111111]">
+        <DialogHeader>
+          <DialogTitle>Create Account</DialogTitle>
+        </DialogHeader>
+        <form className="space-y-4" onSubmit={form.handleSubmit(onSubmit)} noValidate>
+          <Field label="Full Name" error={form.formState.errors.full_name?.message}>
+            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" autoComplete="name" {...form.register("full_name")} />
+          </Field>
+          <Field label="Email Address" error={form.formState.errors.email?.message}>
+            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="email" autoComplete="email" {...form.register("email")} />
+          </Field>
+          <Field label="Password" error={form.formState.errors.password?.message}>
+            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="password" autoComplete="new-password" {...form.register("password")} />
+          </Field>
+          <Field label="Confirm Password" error={form.formState.errors.confirm_password?.message}>
+            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="password" autoComplete="new-password" {...form.register("confirm_password")} />
+          </Field>
+          <div className="flex justify-end gap-2 pt-2">
+            <DialogClose asChild>
+              <Button type="button" variant="outline">Cancel</Button>
+            </DialogClose>
+            <Button className="bg-[#E10600] hover:bg-[#C70000]" disabled={form.formState.isSubmitting}>
+              {form.formState.isSubmitting ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <UserPlus className="h-4 w-4" />}
+              Create Account
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-4 py-1">
+            <span className="h-px flex-1 bg-gradient-to-r from-transparent to-[#E5E5E5]" />
+            <span className="whitespace-nowrap text-[11px] font-medium text-[#9CA3AF]">or continue with</span>
+            <span className="h-px flex-1 bg-gradient-to-l from-transparent to-[#E5E5E5]" />
+          </div>
+
+          <div className="flex items-center justify-center gap-5">
+            <SocialIconButton
+              ariaLabel="Continue with Google"
+              disabled={form.formState.isSubmitting || googleLoading}
+              icon={googleLoading ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E10600]/20 border-t-[#E10600]" /> : <GoogleIcon />}
+              onClick={onGoogle}
+            />
+            <SocialIconButton
+              ariaLabel="Continue with Apple"
+              featured
+              icon={<img alt="" className="h-5 w-5 object-contain" src={APPLE_LOGO} />}
+              onClick={() => onProviderUnavailable("Apple")}
+            />
+            <SocialIconButton
+              ariaLabel="Continue with Facebook"
+              icon={<FacebookIcon />}
+              onClick={() => onProviderUnavailable("Facebook")}
+            />
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SocialIconButton({
+  ariaLabel,
+  disabled,
+  featured,
+  icon,
+  onClick
+}: {
+  ariaLabel: string;
+  disabled?: boolean;
+  featured?: boolean;
+  icon: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={ariaLabel}
+      className={cn(
+        "grid h-9 w-12 place-items-center rounded-lg border border-[#EAEAEA] bg-white text-[#111111] shadow-sm transition duration-300 hover:-translate-y-0.5 hover:bg-[#F7F7F7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600] disabled:pointer-events-none disabled:opacity-60",
+        featured && "h-12 w-16 rounded-xl shadow-xl shadow-black/15 hover:bg-white"
+      )}
+      disabled={disabled}
+      onClick={onClick}
+      type="button"
+    >
+      {icon}
+    </button>
+  );
+}
+
+function GoogleIcon() {
+  return (
+    <svg aria-hidden="true" className="h-5 w-5" viewBox="0 0 24 24">
+      <path d="M21.6 12.23c0-.78-.07-1.53-.2-2.23H12v4.22h5.38a4.6 4.6 0 0 1-2 3.02v2.51h3.24c1.9-1.75 2.98-4.32 2.98-7.52Z" fill="#4285F4" />
+      <path d="M12 22c2.7 0 4.97-.9 6.62-2.45l-3.24-2.51c-.9.6-2.04.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H3.07v2.59A10 10 0 0 0 12 22Z" fill="#34A853" />
+      <path d="M6.41 13.88A6.01 6.01 0 0 1 6.1 12c0-.65.11-1.28.31-1.88V7.53H3.07A10 10 0 0 0 2 12c0 1.61.39 3.14 1.07 4.47l3.34-2.59Z" fill="#FBBC05" />
+      <path d="M12 6c1.47 0 2.78.51 3.82 1.5l2.87-2.87A9.61 9.61 0 0 0 12 2a10 10 0 0 0-8.93 5.53l3.34 2.59C7.2 7.76 9.4 6 12 6Z" fill="#EA4335" />
+    </svg>
+  );
+}
+
+function FacebookIcon() {
+  return (
+    <svg aria-hidden="true" className="h-5 w-5" viewBox="0 0 24 24">
+      <path d="M22 12.06C22 6.5 17.52 2 12 2S2 6.5 2 12.06C2 17.08 5.66 21.25 10.44 22v-7.03H7.9v-2.91h2.54V9.84c0-2.52 1.49-3.91 3.78-3.91 1.1 0 2.24.2 2.24.2v2.48h-1.26c-1.24 0-1.63.78-1.63 1.57v1.88h2.77l-.44 2.91h-2.33V22C18.34 21.25 22 17.08 22 12.06Z" fill="#1877F2" />
+      <path d="m15.89 14.97.44-2.91h-2.77v-1.88c0-.8.39-1.57 1.63-1.57h1.26V6.13s-1.14-.2-2.24-.2c-2.29 0-3.78 1.39-3.78 3.91v2.22H7.9v2.91h2.54V22a10.18 10.18 0 0 0 3.12 0v-7.03h2.33Z" fill="#FFFFFF" />
+    </svg>
+  );
+}
+
+function DashboardPage({ profile }: { profile: Profile }) {
+  const [records, setRecords] = useState<AiUsage[]>([]);
+  const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+
+  useEffect(() => {
+    loadUsage(profile, setRecords);
+    getPurchases(profile).then(setPurchases).catch(console.error);
+  }, [profile]);
+
+  const stats = getDashboardStats(records, purchases);
+  const monthly = getMonthlySeries(records);
+  const platform = getPlatformSeries(records);
+  const daily = getDailyActivity(records);
+  const categories = getCategorySeries(records);
+  const suppliers = getSupplierUsage(records);
+
+  return (
+    <>
+      <PageHeader title="Executive Dashboard" description="Live AI credit usage, productivity, purchasing, and balance insights." />
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <KpiCard title="Total Purchased Credits" value={stats.totalBuyCredits} icon={Wallet} />
+        <KpiCard title="Total Credits Used" value={stats.totalCreditsUsed} icon={TrendingDown} />
+        <KpiCard title="Remaining Credits" value={stats.remainingCredits} icon={PiggyBank} />
+        <KpiCard title="Total Styles Created" value={stats.totalStyles} icon={Layers} />
+        <KpiCard title="Total Images Generated" value={stats.totalImages} icon={ImageIcon} />
+        <KpiCard title="Total Entries" value={stats.totalEntries} icon={ListChecks} />
+        <KpiCard title="Monthly Usage" value={stats.monthlyUsage} icon={CalendarDays} />
+        <KpiCard title="Monthly Purchase" value={stats.monthlyPurchase} icon={Coins} />
+      </section>
+      <CreditProgressCard purchased={stats.totalBuyCredits} used={stats.totalCreditsUsed} remaining={stats.remainingCredits} percentage={stats.usagePercentage} />
+      <section className="mt-6 grid gap-6 xl:grid-cols-2">
+        <MonthlyUsageChart data={monthly} />
+        <ProductivityChart data={monthly} />
+        <PlatformChart data={platform} />
+        <DailyActivityChart data={daily} />
+      </section>
+      <section className="mt-6">
+        <RecentActivity records={records.slice(0, 10)} />
+      </section>
+      <section className="mt-6 grid gap-6 xl:grid-cols-3">
+        <SummaryList title="Top Categories" rows={categories.slice(0, 6).map((item) => [item.category, formatNumber(item.creditsUsed)])} />
+        <SummaryList title="Top Suppliers" rows={suppliers.slice(0, 6).map((item) => [item.supplier, formatNumber(item.creditsUsed)])} />
+        <SummaryList title="Latest Purchases" rows={purchases.slice(0, 6).map((item) => [`${item.platform} · ${item.invoice_number}`, formatNumber(item.total_credits_purchased)])} empty="No purchases yet." />
+      </section>
+    </>
+  );
+}
+
+function SummaryList({ title, rows, empty = "No data yet." }: { title: string; rows: string[][]; empty?: string }) {
+  return (
+    <Card>
+      <CardHeader><CardTitle>{title}</CardTitle></CardHeader>
+      <CardContent className="space-y-3">
+        {rows.length ? rows.map(([label, value]) => (
+          <div className="flex items-center justify-between gap-3 text-sm" key={label}>
+            <span className="truncate font-medium">{label}</span>
+            <span className="text-muted-foreground">{value}</span>
+          </div>
+        )) : <p className="text-sm text-muted-foreground">{empty}</p>}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PurchaseCreditsPage({ profile }: { profile: Profile }) {
+  const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+  const [usage, setUsage] = useState<AiUsage[]>([]);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<CreditPurchase | null>(null);
+  const [invoicePreview, setInvoicePreview] = useState<CreditPurchase | null>(null);
+  const [search, setSearch] = useState("");
+  const { toast } = useToast();
+
+  async function refresh() {
+    try {
+      setPurchases(await getPurchases(profile));
+      setUsage(await getUsage(profile));
+    } catch (error) {
+      toast({ title: "Purchases failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, [profile]);
+
+  const purchaseUsage = useMemo(() => allocatePurchaseUsage(purchases, usage), [purchases, usage]);
+  const filtered = purchases.filter((purchase) =>
+    `${purchase.platform} ${purchase.invoice_number} ${purchase.vendor} ${purchase.subscription_plan}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  async function remove(purchase: CreditPurchase) {
+    if (!confirm(`Delete purchase ${purchase.invoice_number}?`)) return;
+    await deletePurchase(purchase.id);
+    toast({ title: "Purchase deleted" });
+    refresh();
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="Purchase Credits"
+        description="Upload invoices, record AI subscriptions, and create platform credit balances."
+        action={<Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Purchase</Button>}
+      />
+      <Card className="mb-4">
+        <CardContent className="p-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Input className="pl-9" placeholder="Search platform, invoice, vendor, plan" value={search} onChange={(event) => setSearch(event.target.value)} />
+          </div>
+        </CardContent>
+      </Card>
+      <PurchaseAlerts purchases={purchases} usage={usage} />
+      <DataTable
+        headers={["Date", "Platform", "Invoice", "Credits Purchased", "Used", "Remaining", "Status", "Invoice", ""]}
+        empty="No credit purchases yet."
+        rows={filtered.map((purchase) => {
+          const used = purchaseUsage.get(purchase.id) ?? 0;
+          const remaining = purchase.total_credits_purchased - used;
+          const status = purchase.expiry_date && purchase.expiry_date < new Date().toISOString().slice(0, 10) ? "Expired" : remaining <= 0 ? "Exhausted" : remaining / purchase.total_credits_purchased < 0.2 ? "Low" : "Active";
+          return [
+            formatDate(purchase.purchase_date),
+            purchase.platform,
+            purchase.invoice_number,
+            formatNumber(purchase.total_credits_purchased),
+            formatNumber(used),
+            formatNumber(Math.max(remaining, 0)),
+            status,
+            purchase.invoice_file ? (
+              <Button key={`${purchase.id}-invoice`} size="sm" variant="outline" onClick={() => setInvoicePreview(purchase)}>Preview</Button>
+            ) : "Missing",
+            <div className="flex gap-2" key={purchase.id}>
+              <Button variant="outline" size="sm" onClick={() => { setEditing(purchase); setOpen(true); }}>Edit</Button>
+              <Button variant="destructive" size="sm" onClick={() => remove(purchase)}>Delete</Button>
+            </div>
+          ];
+        })}
+      />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader><DialogTitle>{editing ? "Edit Purchase" : "New Credit Purchase"}</DialogTitle></DialogHeader>
+          <PurchaseForm currentUser={profile} purchase={editing} onDone={() => { setOpen(false); refresh(); }} />
+        </DialogContent>
+      </Dialog>
+      <InvoiceViewer purchase={invoicePreview} onOpenChange={(open) => !open && setInvoicePreview(null)} onReplaced={refresh} />
+    </>
+  );
+}
+
+function allocatePurchaseUsage(purchases: CreditPurchase[], usage: AiUsage[]) {
+  const usageByPlatform = new Map<string, number>();
+  usage.forEach((record) => usageByPlatform.set(record.platform, (usageByPlatform.get(record.platform) ?? 0) + Number(record.credits_used || 0)));
+  const allocation = new Map<string, number>();
+  const byPlatform = new Map<string, CreditPurchase[]>();
+  purchases.forEach((purchase) => {
+    byPlatform.set(purchase.platform, [...(byPlatform.get(purchase.platform) ?? []), purchase]);
+  });
+  byPlatform.forEach((items, platform) => {
+    let remainingUsage = usageByPlatform.get(platform) ?? 0;
+    items
+      .slice()
+      .sort((a, b) => a.purchase_date.localeCompare(b.purchase_date))
+      .forEach((purchase) => {
+        const used = Math.min(remainingUsage, Number(purchase.total_credits_purchased || 0));
+        allocation.set(purchase.id, used);
+        remainingUsage -= used;
+      });
+  });
+  return allocation;
+}
+
+function PurchaseAlerts({ purchases, usage }: { purchases: CreditPurchase[]; usage: AiUsage[] }) {
+  const allocation = allocatePurchaseUsage(purchases, usage);
+  const today = new Date();
+  const soon = new Date();
+  soon.setDate(today.getDate() + 14);
+  const alerts = purchases.flatMap((purchase) => {
+    const used = allocation.get(purchase.id) ?? 0;
+    const remaining = purchase.total_credits_purchased - used;
+    const ratio = purchase.total_credits_purchased ? remaining / purchase.total_credits_purchased : 0;
+    const items: string[] = [];
+    if (!purchase.invoice_file) items.push(`${purchase.platform} ${purchase.invoice_number}: invoice missing.`);
+    if (remaining <= 0) items.push(`${purchase.platform} ${purchase.invoice_number}: credits exhausted.`);
+    else if (ratio < 0.2) items.push(`${purchase.platform} ${purchase.invoice_number}: credits below 20%.`);
+    if (purchase.expiry_date) {
+      const expiry = new Date(purchase.expiry_date);
+      if (expiry >= today && expiry <= soon) items.push(`${purchase.platform} ${purchase.invoice_number}: subscription expires soon.`);
+    }
+    return items;
+  });
+  if (!alerts.length) return null;
+  return (
+    <Card className="mb-4 border-[#E53935]/30 bg-[#E53935]/5">
+      <CardContent className="space-y-2 p-4">
+        <p className="flex items-center gap-2 text-sm font-bold text-[#E53935]"><AlertTriangle className="h-4 w-4" />Alerts</p>
+        {alerts.slice(0, 6).map((alert) => <p className="text-sm text-muted-foreground" key={alert}>{alert}</p>)}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile; purchase: CreditPurchase | null; onDone: () => void }) {
+  const { toast } = useToast();
+  const [invoice, setInvoice] = useState<InvoiceFile | null>(purchase?.invoice_file ?? null);
+  const form = useForm<PurchaseFormValues>({
+    resolver: zodResolver(purchaseSchema),
+    defaultValues: purchase
+      ? {
+          platform: purchase.platform,
+          purchase_date: purchase.purchase_date,
+          subscription_plan: purchase.subscription_plan,
+          invoice_number: purchase.invoice_number,
+          currency: purchase.currency,
+          purchase_amount: purchase.purchase_amount,
+          total_credits_purchased: purchase.total_credits_purchased,
+          expiry_date: purchase.expiry_date ?? "",
+          payment_method: purchase.payment_method,
+          vendor: purchase.vendor,
+          notes: purchase.notes ?? ""
+        }
+      : {
+          platform: "Freepik",
+          purchase_date: new Date().toISOString().slice(0, 10),
+          subscription_plan: "",
+          invoice_number: "",
+          currency: "INR",
+          purchase_amount: 0,
+          total_credits_purchased: 45000,
+          expiry_date: "",
+          payment_method: "UPI",
+          vendor: "",
+          notes: ""
+        }
+  });
+
+  async function onSubmit(values: PurchaseFormValues) {
+    try {
+      await savePurchase({
+        ...values,
+        user_id: purchase?.user_id ?? currentUser.id,
+        expiry_date: values.expiry_date || null,
+        notes: values.notes || null,
+        invoice_file: invoice
+      }, purchase?.id);
+      toast({ title: purchase ? "Purchase updated" : "Purchase saved", description: invoice ? "Invoice linked to credit balance." : "Invoice missing. Add it when available." });
+      onDone();
+    } catch (error) {
+      toast({ title: "Purchase save failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  return (
+    <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      <Field label="AI Platform" error={form.formState.errors.platform?.message}>
+        <Select value={form.watch("platform")} onValueChange={(value) => form.setValue("platform", value as Platform, { shouldValidate: true })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>{PLATFORMS.map((platform) => <SelectItem key={platform} value={platform}>{platform}</SelectItem>)}</SelectContent>
+        </Select>
+      </Field>
+      <Field label="Purchase Date" error={form.formState.errors.purchase_date?.message}><Input type="date" {...form.register("purchase_date")} /></Field>
+      <Field label="Subscription Plan" error={form.formState.errors.subscription_plan?.message}><Input {...form.register("subscription_plan")} /></Field>
+      <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input {...form.register("invoice_number")} /></Field>
+      <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
+      <Field label="Purchase Amount" error={form.formState.errors.purchase_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("purchase_amount")} /></Field>
+      <Field label="Total Credits Purchased" error={form.formState.errors.total_credits_purchased?.message}><Input type="number" min="1" {...form.register("total_credits_purchased")} /></Field>
+      <Field label="Expiry Date (Optional)"><Input type="date" {...form.register("expiry_date")} /></Field>
+      <Field label="Payment Method">
+        <Select value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod, { shouldValidate: true })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>{["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+        </Select>
+      </Field>
+      <Field label="Vendor" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
+      <Field label="Invoice Upload" className="sm:col-span-2">
+        <InvoiceUpload invoice={invoice} onInvoice={setInvoice} />
+      </Field>
+      <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
+      <div className="flex justify-end gap-2 sm:col-span-2">
+        <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
+        <Button disabled={form.formState.isSubmitting}>Save</Button>
+      </div>
+    </form>
+  );
+}
+
+function InvoiceUpload({ invoice, onInvoice }: { invoice: InvoiceFile | null; onInvoice: (invoice: InvoiceFile | null) => void }) {
+  const { toast } = useToast();
+  async function handleFile(file?: File) {
+    if (!file) return;
+    if (!["application/pdf", "image/jpeg", "image/png"].includes(file.type)) {
+      toast({ title: "Invalid invoice file", description: "Upload PDF, JPG, or PNG only.", variant: "destructive" });
+      return;
+    }
+    const data_url = await fileToDataUrl(file);
+    onInvoice({ name: file.name, type: file.type, size: file.size, data_url, uploaded_at: new Date().toISOString() });
+  }
+
+  return (
+    <div className="rounded-md border border-dashed p-4">
+      {invoice ? (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="font-semibold">{invoice.name}</p>
+            <p className="text-xs text-muted-foreground">{invoice.type} · {formatNumber(Math.round(invoice.size / 1024))} KB</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" onClick={() => downloadInvoice(invoice)}><Download className="h-4 w-4" />Download</Button>
+            <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border px-4 text-sm font-medium">
+              Replace
+              <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleFile(event.target.files?.[0])} />
+            </label>
+            <Button type="button" variant="destructive" onClick={() => onInvoice(null)}>Delete</Button>
+          </div>
+        </div>
+      ) : (
+        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 py-6 text-center text-sm text-muted-foreground">
+          <FileUp className="h-6 w-6" />
+          Upload invoice PDF, JPG, or PNG
+          <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleFile(event.target.files?.[0])} />
+        </label>
+      )}
+    </div>
+  );
+}
+
+function InvoiceViewer({ purchase, onOpenChange, onReplaced }: { purchase: CreditPurchase | null; onOpenChange: (open: boolean) => void; onReplaced: () => void }) {
+  const [zoom, setZoom] = useState(1);
+  if (!purchase) return null;
+  const invoice = purchase.invoice_file;
+  return (
+    <Dialog open={!!purchase} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader><DialogTitle>Invoice {purchase.invoice_number}</DialogTitle></DialogHeader>
+        {invoice ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={() => setZoom((value) => Math.min(value + 0.15, 2))}>Zoom In</Button>
+              <Button type="button" variant="outline" onClick={() => setZoom((value) => Math.max(value - 0.15, 0.6))}>Zoom Out</Button>
+              <Button type="button" variant="outline" onClick={() => downloadInvoice(invoice)}><Download className="h-4 w-4" />Download</Button>
+              <Button type="button" variant="outline" onClick={() => window.print()}>Print</Button>
+            </div>
+            <div className="overflow-auto rounded-md border bg-muted p-3">
+              {invoice.type === "application/pdf" ? (
+                <iframe title={invoice.name} src={invoice.data_url} className="h-[70vh] w-full rounded bg-white" style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }} />
+              ) : (
+                <img src={invoice.data_url} alt={invoice.name} className="mx-auto max-h-[70vh] rounded bg-white object-contain" style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }} />
+              )}
+            </div>
+          </div>
+        ) : <p className="text-sm text-muted-foreground">No invoice uploaded for this purchase.</p>}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function downloadInvoice(invoice: InvoiceFile) {
+  const anchor = document.createElement("a");
+  anchor.href = invoice.data_url;
+  anchor.download = invoice.name;
+  anchor.click();
+}
+
+function UsagePage({ profile }: { profile: Profile }) {
+  const [records, setRecords] = useState<AiUsage[]>([]);
+  const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<AiUsage | null>(null);
+  const [search, setSearch] = useState("");
+  const { toast } = useToast();
+
+  async function refresh() {
+    await loadUsage(profile, setRecords);
+    setPurchases(await getPurchases(profile));
+  }
+
+  useEffect(() => {
+    refresh();
+  }, [profile]);
+
+  const filtered = records.filter((record) =>
+    `${record.platform} ${record.category ?? ""} ${record.description} ${record.supplier_requirements ?? ""}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  async function remove(record: AiUsage) {
+    if (!confirm(`Delete ${record.platform} usage from ${formatDate(record.date)}?`)) return;
+    try {
+      await deleteUsage(record.id);
+      toast({ title: "Usage deleted" });
+      refresh();
+    } catch (error) {
+      toast({ title: "Delete failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="AI Usage"
+        description="Create, review, update, filter, and delete AI usage records."
+        action={<Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Usage</Button>}
+      />
+      <Card className="mb-4">
+        <CardContent className="p-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Input className="pl-9" placeholder="Search platform, description, supplier" value={search} onChange={(event) => setSearch(event.target.value)} />
+          </div>
+        </CardContent>
+      </Card>
+      <DataTable
+        headers={["S.No", "Date", "Platform", "Category", "Purchased", "Used", "Remaining", "Styles", "Images", "Purpose", ""]}
+        empty="No usage records yet."
+        rows={filtered.map((record, index) => [
+          index + 1,
+          formatDate(record.date),
+          record.platform,
+          record.category || "Custom",
+          formatNumber(record.buy_credits),
+          formatNumber(record.credits_used),
+          formatNumber(record.remaining_credits),
+          record.number_of_styles,
+          record.number_of_images,
+          record.description,
+          <div className="flex gap-2" key={record.id}>
+            <Button variant="outline" size="sm" onClick={() => { setEditing(record); setOpen(true); }}>Edit</Button>
+            <Button variant="destructive" size="sm" onClick={() => remove(record)}>Delete</Button>
+          </div>
+        ])}
+      />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{editing ? "Edit Usage" : "New Usage"}</DialogTitle></DialogHeader>
+          <UsageForm currentUser={profile} record={editing} records={records} purchases={purchases} onDone={() => { setOpen(false); refresh(); }} />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function CreditProgressCard({
+  purchased,
+  used,
+  remaining,
+  percentage
+}: {
+  purchased: number;
+  used: number;
+  remaining: number;
+  percentage: number;
+}) {
+  const safePercentage = Math.min(Math.max(percentage || 0, 0), 100);
+  return (
+    <Card className="mt-6 overflow-hidden">
+      <CardContent className="p-5">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-semibold">Usage Percentage</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Credits Used: {formatNumber(used)} / {formatNumber(purchased)}
+            </p>
+          </div>
+          <div className="text-left sm:text-right">
+            <p className="text-2xl font-bold">{safePercentage.toFixed(0)}%</p>
+            <p className="text-sm text-muted-foreground">Remaining: {formatNumber(Math.max(remaining, 0))}</p>
+          </div>
+        </div>
+        <div className="mt-4 h-3 overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-[#E53935] transition-all duration-500" style={{ width: `${safePercentage}%` }} />
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function UsageForm({ currentUser, record, records, purchases, onDone }: { currentUser: Profile; record: AiUsage | null; records: AiUsage[]; purchases: CreditPurchase[]; onDone: () => void }) {
+  const { toast } = useToast();
+  const [customCategories, setCustomCategories] = useState<string[]>([]);
+  const [customCategory, setCustomCategory] = useState("");
+  const form = useForm<AiUsageFormValues>({
+    resolver: zodResolver(aiUsageSchema),
+    defaultValues: record
+      ? {
+          date: record.date,
+          platform: record.platform,
+          category: record.category || "Custom",
+          buy_credits: record.buy_credits,
+          description: record.description,
+          number_of_styles: record.number_of_styles,
+          number_of_images: record.number_of_images,
+          credits_used: record.credits_used,
+          supplier_requirements:
+            record.supplier_requirements === "Renga" || record.supplier_requirements === "Syed"
+              ? record.supplier_requirements
+              : "Renga"
+        }
+      : {
+          date: new Date().toISOString().slice(0, 10),
+          platform: "ChatGPT",
+          category: "Fashion",
+          buy_credits: DEFAULT_PLATFORM_CREDIT_PACKS.ChatGPT ?? 0,
+          description: "",
+          number_of_styles: 0,
+          number_of_images: 0,
+          credits_used: 0,
+          supplier_requirements: "Renga"
+        }
+  });
+  const selectedPlatform = form.watch("platform");
+  const selectedCategory = form.watch("category");
+  const purchasedCredits = Number(form.watch("buy_credits") || 0);
+  const numberOfStyles = Number(form.watch("number_of_styles") || 0);
+  const totalImages = numberOfStyles * IMAGES_PER_STYLE;
+  const creditsUsed = totalImages * CREDITS_PER_IMAGE;
+  const previousPlatformCreditsUsed = records
+    .filter((item) => item.id !== record?.id && item.user_id === (record?.user_id ?? currentUser.id) && item.platform === selectedPlatform)
+    .reduce((sum, item) => sum + Number(item.credits_used || 0), 0);
+  const remainingCredits = purchasedCredits - previousPlatformCreditsUsed - creditsUsed;
+  const usagePercentage = purchasedCredits > 0 ? ((previousPlatformCreditsUsed + creditsUsed) / purchasedCredits) * 100 : 0;
+  const insufficientCredits = remainingCredits < 0;
+
+  useEffect(() => {
+    form.setValue("number_of_images", totalImages, { shouldValidate: true });
+    form.setValue("credits_used", creditsUsed, { shouldValidate: true });
+  }, [creditsUsed, form, totalImages]);
+
+  useEffect(() => {
+    getUsageCategories().then(setCustomCategories).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    form.setValue("buy_credits", getPlatformPurchasedCredits(selectedPlatform), { shouldValidate: true });
+  }, [purchases, selectedPlatform]);
+
+  function allCategories() {
+    return Array.from(new Set([...USAGE_CATEGORIES, ...customCategories])).sort((a, b) => a.localeCompare(b));
+  }
+
+  function getPlatformPurchasedCredits(platform: Platform) {
+    return purchases
+      .filter((purchase) => purchase.user_id === (record?.user_id ?? currentUser.id) && purchase.platform === platform)
+      .reduce((sum, purchase) => sum + Number(purchase.total_credits_purchased || 0), 0);
+  }
+
+  async function onSubmit(values: AiUsageFormValues) {
+    const finalCategory = values.category === "__custom" ? customCategory.trim() : values.category;
+    if (!finalCategory) {
+      toast({ title: "Category required", description: "Select or create a usage category.", variant: "destructive" });
+      return;
+    }
+    if (insufficientCredits) {
+      toast({
+        title: "Insufficient Credits. Please purchase more credits.",
+        description: `${selectedPlatform} needs ${formatNumber(Math.abs(remainingCredits))} more credits for this usage.`,
+        variant: "destructive"
+      });
+      return;
+    }
+    try {
+      await saveUsage(
+        {
+          ...values,
+          category: finalCategory,
+          buy_credits: purchasedCredits,
+          number_of_images: totalImages,
+          credits_used: creditsUsed,
+          supplier_requirements: values.supplier_requirements || "Renga",
+          user_id: record?.user_id ?? currentUser.id
+        },
+        record?.id
+      );
+      if (values.category === "__custom") await saveUsageCategory(finalCategory);
+      toast({ title: record ? "Usage updated" : "Usage created" });
+      onDone();
+    } catch (error) {
+      toast({ title: "Save failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  return (
+    <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      <Field label="Date" error={form.formState.errors.date?.message}><Input type="date" {...form.register("date")} /></Field>
+      <Field label="Platform" error={form.formState.errors.platform?.message}>
+        <Select
+          value={selectedPlatform}
+          onValueChange={(value) => {
+            const platform = value as Platform;
+            form.setValue("platform", platform, { shouldValidate: true });
+            form.setValue("buy_credits", getPlatformPurchasedCredits(platform), { shouldValidate: true });
+          }}
+        >
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>{PLATFORMS.map((platform) => <SelectItem key={platform} value={platform}>{platform}</SelectItem>)}</SelectContent>
+        </Select>
+      </Field>
+      <Field label="Category" error={form.formState.errors.category?.message}>
+        <Select value={selectedCategory} onValueChange={(value) => form.setValue("category", value, { shouldValidate: true })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {allCategories().map((category) => <SelectItem key={category} value={category}>{category}</SelectItem>)}
+            <SelectItem value="__custom">Custom Category</SelectItem>
+          </SelectContent>
+        </Select>
+      </Field>
+      {selectedCategory === "__custom" ? (
+        <Field label="Custom Category" className="sm:col-span-2">
+          <Input value={customCategory} onChange={(event) => setCustomCategory(event.target.value)} placeholder="Enter new category" />
+        </Field>
+      ) : null}
+      <Field label="Number of Styles" error={form.formState.errors.number_of_styles?.message}><Input type="number" min="0" {...form.register("number_of_styles")} /></Field>
+      <div className="grid gap-3 rounded-md border bg-muted/35 p-4 sm:col-span-2 sm:grid-cols-3">
+        <CalculationItem label="Purchased Credits" value={purchasedCredits} />
+        <CalculationItem label="Total Images" value={totalImages} />
+        <CalculationItem label="Credits Used" value={creditsUsed} />
+        <CalculationItem label="Remaining Credits" value={Math.max(remainingCredits, 0)} danger={insufficientCredits} />
+        <div className="sm:col-span-3">
+          <div className="mb-2 flex items-center justify-between text-xs font-medium text-muted-foreground">
+            <span>{formatNumber(previousPlatformCreditsUsed + creditsUsed)} / {formatNumber(purchasedCredits)} used</span>
+            <span>{Math.min(Math.max(usagePercentage, 0), 100).toFixed(0)}%</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-muted">
+            <div className={cn("h-full rounded-full transition-all duration-300", insufficientCredits ? "bg-destructive" : "bg-[#E53935]")} style={{ width: `${Math.min(Math.max(usagePercentage, 0), 100)}%` }} />
+          </div>
+          {insufficientCredits ? (
+            <p className="mt-3 flex items-center gap-2 text-sm font-medium text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              Insufficient Credits. Please purchase more credits.
+            </p>
+          ) : null}
+        </div>
+      </div>
+      <Field label="Description / Purpose" error={form.formState.errors.description?.message} className="sm:col-span-2"><Textarea {...form.register("description")} /></Field>
+      <Field label="Supplier" className="sm:col-span-2">
+        <Select value={form.watch("supplier_requirements") || "Renga"} onValueChange={(value) => form.setValue("supplier_requirements", value, { shouldValidate: true })}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {SUPPLIERS.map((supplier) => <SelectItem key={supplier} value={supplier}>{supplier}</SelectItem>)}
+          </SelectContent>
+        </Select>
+      </Field>
+      <div className="flex justify-end gap-2 sm:col-span-2">
+        <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
+        <Button disabled={form.formState.isSubmitting || insufficientCredits}>Save</Button>
+      </div>
+    </form>
+  );
+}
+
+function CalculationItem({ label, value, danger }: { label: string; value: number; danger?: boolean }) {
+  return (
+    <div>
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <p className={cn("mt-1 text-lg font-bold", danger && "text-destructive")}>{formatNumber(value)}</p>
+    </div>
+  );
+}
+
+function ReportsPage({ profile }: { profile: Profile }) {
+  const [records, setRecords] = useState<AiUsage[]>([]);
+  const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+  useEffect(() => {
+    loadUsage(profile, setRecords);
+    getPurchases(profile).then(setPurchases).catch(console.error);
+  }, [profile]);
+  return (
+    <>
+      <PageHeader title="Reports" description="Monthly, platform, date range, and supplier reports with export options." />
+      <ReportsDashboard records={records} purchases={purchases} />
+    </>
+  );
+}
+
+function PaymentsPage({ profile }: { profile: Profile }) {
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<Payment | null>(null);
+  const [search, setSearch] = useState("");
+  const { toast } = useToast();
+
+  async function refresh() {
+    try {
+      setPayments(await getPayments(profile));
+    } catch (error) {
+      toast({ title: "Payments failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, [profile]);
+
+  const filtered = payments.filter((payment) =>
+    `${payment.customer_name} ${payment.customer_email} ${payment.payment_id} ${payment.transaction_id} ${payment.order_id}`.toLowerCase().includes(search.toLowerCase())
+  );
+
+  function exportPayments() {
+    const header = ["Customer", "Email", "Payment ID", "Transaction ID", "Order ID", "Amount", "Currency", "Method", "Status", "Invoice"];
+    const rows = filtered.map((p) => [p.customer_name, p.customer_email, p.payment_id, p.transaction_id, p.order_id, p.amount, p.currency, p.payment_method, p.payment_status, p.invoice_number]);
+    const csv = [header, ...rows].map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "zeal-payments.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <>
+      <PageHeader
+        title="Payments"
+        description={profile.role === "admin" ? "Manage all customer payment records." : "View your payment history."}
+        action={<div className="flex gap-2"><Button variant="outline" onClick={exportPayments}>Export</Button><Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Payment</Button></div>}
+      />
+      <Card className="mb-4">
+        <CardContent className="p-4">
+          <Input placeholder="Search payments" value={search} onChange={(event) => setSearch(event.target.value)} />
+        </CardContent>
+      </Card>
+      <DataTable
+        headers={["Customer", "Payment ID", "Order", "Amount", "Method", "Status", "Invoice", "Date", ""]}
+        empty="No payments found."
+        rows={filtered.map((payment) => [
+          `${payment.customer_name} (${payment.customer_email})`,
+          payment.payment_id,
+          payment.order_id,
+          `${payment.currency} ${formatNumber(payment.amount)}`,
+          payment.payment_method,
+          payment.payment_status,
+          payment.invoice_number,
+          formatDate(payment.paid_at),
+          <div className="flex gap-2" key={payment.id}>
+            <Button variant="outline" size="sm" onClick={() => { setEditing(payment); setOpen(true); }}>View/Edit</Button>
+            {profile.role === "admin" ? <Button variant="destructive" size="sm" onClick={async () => { await deletePayment(payment.id); refresh(); }}>Delete</Button> : null}
+          </div>
+        ])}
+      />
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{editing ? "Payment Details" : "New Payment"}</DialogTitle></DialogHeader>
+          <PaymentForm currentUser={profile} payment={editing} onDone={() => { setOpen(false); refresh(); }} />
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; payment: Payment | null; onDone: () => void }) {
+  const { toast } = useToast();
+  const form = useForm<PaymentFormValues>({
+    resolver: zodResolver(paymentSchema),
+    defaultValues: payment
+      ? {
+          customer_name: payment.customer_name,
+          customer_email: payment.customer_email,
+          payment_id: payment.payment_id,
+          transaction_id: payment.transaction_id,
+          order_id: payment.order_id,
+          amount: payment.amount,
+          currency: payment.currency,
+          payment_method: payment.payment_method,
+          payment_detail: payment.payment_detail ?? "",
+          payment_status: payment.payment_status,
+          paid_at: payment.paid_at.slice(0, 16),
+          invoice_number: payment.invoice_number,
+          notes: payment.notes ?? ""
+        }
+      : {
+          customer_name: currentUser.full_name,
+          customer_email: currentUser.email,
+          payment_id: "",
+          transaction_id: "",
+          order_id: "",
+          amount: 0,
+          currency: "INR",
+          payment_method: "UPI",
+          payment_detail: "",
+          payment_status: "Pending",
+          paid_at: new Date().toISOString().slice(0, 16),
+          invoice_number: `INV-${Date.now()}`,
+          notes: ""
+        }
+  });
+
+  async function onSubmit(values: PaymentFormValues) {
+    try {
+      await savePayment({ ...values, user_id: payment?.user_id ?? currentUser.id, payment_detail: values.payment_detail || null, notes: values.notes || null }, payment?.id);
+      toast({ title: payment ? "Payment updated" : "Payment created" });
+      onDone();
+    } catch (error) {
+      toast({ title: "Payment save failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  return (
+    <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      <Field label="Customer Name" error={form.formState.errors.customer_name?.message}><Input {...form.register("customer_name")} /></Field>
+      <Field label="Customer Email" error={form.formState.errors.customer_email?.message}><Input type="email" {...form.register("customer_email")} /></Field>
+      <Field label="Payment ID" error={form.formState.errors.payment_id?.message}><Input {...form.register("payment_id")} /></Field>
+      <Field label="Transaction ID" error={form.formState.errors.transaction_id?.message}><Input {...form.register("transaction_id")} /></Field>
+      <Field label="Order ID" error={form.formState.errors.order_id?.message}><Input {...form.register("order_id")} /></Field>
+      <Field label="Amount" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
+      <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
+      <Field label="Payment Method">
+        <Select value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod)}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>{["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+        </Select>
+      </Field>
+      <Field label="UPI ID / Bank / Card Type"><Input {...form.register("payment_detail")} /></Field>
+      <Field label="Status">
+        <Select value={form.watch("payment_status")} onValueChange={(value) => form.setValue("payment_status", value as PaymentStatus)}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>{["Pending", "Paid", "Failed", "Refunded"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+        </Select>
+      </Field>
+      <Field label="Date & Time" error={form.formState.errors.paid_at?.message}><Input type="datetime-local" {...form.register("paid_at")} /></Field>
+      <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input {...form.register("invoice_number")} /></Field>
+      <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
+      <div className="flex justify-end gap-2 sm:col-span-2">
+        <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
+        <Button disabled={form.formState.isSubmitting}>Save</Button>
+      </div>
+    </form>
+  );
+}
+
+function UsersPage({ currentUser }: { currentUser: Profile }) {
+  const [users, setUsers] = useState<Profile[]>([]);
+  const { toast } = useToast();
+
+  async function refresh() {
+    try {
+      setUsers(await getUsers());
+    } catch (error) {
+      toast({ title: "Users failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  async function updateRole(user: Profile, role: "admin" | "user") {
+    try {
+      await updateUserRole(user.id, role);
+      refresh();
+    } catch (error) {
+      toast({ title: "Role update failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  async function toggleDisabled(user: Profile) {
+    try {
+      await setUserDisabled(user.id, !user.disabled);
+      refresh();
+    } catch (error) {
+      toast({ title: "User update failed", description: getError(error), variant: "destructive" });
+    }
+  }
+
+  return (
+    <>
+      <PageHeader title="User Management" description="View, disable, and manage roles for registered users." />
+      <DataTable
+        headers={["Name", "Email", "Role", "Status", "Created", ""]}
+        empty="No users found."
+        rows={users.map((user) => [
+          user.full_name,
+          user.email,
+          <Select key={`${user.id}-role`} value={user.role} onValueChange={(role) => updateRole(user, role as "admin" | "user")} disabled={user.id === currentUser.id}>
+            <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+            <SelectContent><SelectItem value="user">User</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent>
+          </Select>,
+          user.disabled ? "Disabled" : "Active",
+          formatDate(user.created_at),
+          <Button key={user.id} variant="outline" size="sm" disabled={user.id === currentUser.id} onClick={() => toggleDisabled(user)}>
+            {user.disabled ? "Enable" : "Disable"}
+          </Button>
+        ])}
+      />
+    </>
+  );
+}
+
+function NavButton({ view, active, setView, icon: Icon, label }: { view: View; active: View; setView: (view: View) => void; icon: typeof LayoutDashboard; label: string }) {
+  return (
+    <button className={cn("flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium text-muted-foreground transition hover:bg-muted hover:text-foreground", active === view && "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground")} onClick={() => setView(view)} type="button">
+      <Icon className="h-4 w-4" />
+      {label}
+    </button>
+  );
+}
+
+function PageHeader({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
+  return (
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">{title}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function DataTable({ headers, rows, empty }: { headers: string[]; rows: React.ReactNode[][]; empty: string }) {
+  return (
+    <Card>
+      <CardContent className="overflow-x-auto p-0">
+        <table className="w-full min-w-[900px] text-sm">
+          <thead className="bg-muted/60">
+            <tr>{headers.map((header) => <th className="px-4 py-3 text-left font-semibold" key={header}>{header}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.length ? rows.map((row, index) => (
+              <tr className="border-t transition-colors hover:bg-muted/40" key={index}>
+                {row.map((cell, cellIndex) => <td className="px-4 py-3" key={cellIndex}>{cell}</td>)}
+              </tr>
+            )) : (
+              <tr><td className="px-4 py-12 text-center text-muted-foreground" colSpan={headers.length}>{empty}</td></tr>
+            )}
+          </tbody>
+        </table>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Field({ label, error, children, className }: { label: string; error?: string; children: React.ReactNode; className?: string }) {
+  return (
+    <div className={className}>
+      <Label>{label}</Label>
+      <div className="mt-2">{children}</div>
+      {error ? <p className="mt-1 text-xs text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
+function AppLoader() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="h-12 w-12 animate-spin rounded-full border-4 border-muted border-t-primary" />
+    </div>
+  );
+}
+
+async function loadUsage(profile: Profile, setter: (records: AiUsage[]) => void) {
+  try {
+    setter(await getUsage(profile));
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function getError(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong.";
+}
