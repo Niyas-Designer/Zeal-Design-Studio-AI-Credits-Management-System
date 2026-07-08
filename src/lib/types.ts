@@ -16,6 +16,7 @@ export type Profile = {
   full_name: string;
   role: UserRole;
   disabled: boolean;
+  credits: number;
   created_at: string;
   updated_at: string;
 };
@@ -65,6 +66,10 @@ export type Payment = {
   payment_method: PaymentMethod;
   payment_detail: string | null;
   payment_status: PaymentStatus;
+  credits: number;
+  invoice_file_url: string | null;
+  invoice_file: InvoiceFile | null;
+  vendor: string;
   paid_at: string;
   invoice_number: string;
   notes: string | null;
@@ -77,6 +82,16 @@ export type PaymentInput = Omit<
   Payment,
   "id" | "created_at" | "updated_at" | "profiles"
 >;
+
+export type CreditLedgerEntry = {
+  id: string;
+  customer_email: string;
+  payment_id: string;
+  invoice_number: string;
+  credits_added: number;
+  total_credits: number;
+  created_at: string;
+};
 
 export type CreditPurchase = {
   id: string;

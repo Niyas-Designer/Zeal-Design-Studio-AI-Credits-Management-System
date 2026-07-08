@@ -52,10 +52,10 @@ export const paymentSchema = z.object({
   transaction_id: z.string().trim().min(2, "Transaction ID is required"),
   order_id: z.string().trim().min(2, "Order ID is required"),
   amount: z.coerce.number().min(0, "Amount cannot be negative"),
+  credits: z.coerce.number().int().min(1, "Credits purchased is required"),
   currency: z.string().trim().min(2, "Currency is required"),
   payment_method: z.enum(["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"]),
-  payment_detail: z.string().trim().optional().nullable(),
-  payment_status: z.enum(["Pending", "Paid", "Failed", "Refunded"]),
+  vendor: z.string().trim().min(2, "Vendor name is required"),
   paid_at: z.string().min(1, "Date and time is required"),
   invoice_number: z.string().trim().min(2, "Invoice number is required"),
   notes: z.string().trim().optional().nullable()

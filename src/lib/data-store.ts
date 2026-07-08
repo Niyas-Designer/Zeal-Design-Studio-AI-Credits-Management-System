@@ -20,6 +20,7 @@ import type {
   AiUsageInput,
   AiTool,
   AiToolInput,
+  CreditLedgerEntry,
   CreditPurchase,
   CreditPurchaseInput,
   Payment,
@@ -29,8 +30,10 @@ import type {
 } from "@/lib/types";
 
 const USERS_STATE_KEY = "zeal_frontend_user_state";
+const USER_CREDITS_KEY = "zeal_user_credits";
 const USAGE_KEY = "zeal_ai_usage_records";
 const PAYMENTS_KEY = "zeal_payment_records";
+const CREDIT_LEDGER_KEY = "zeal_credit_ledger";
 const AI_TOOLS_KEY = "zeal_ai_studio_tools";
 const PURCHASES_KEY = "zeal_credit_purchases";
 const USAGE_CATEGORIES_KEY = "zeal_usage_categories";
@@ -90,6 +93,7 @@ function passwordProviderNeedsVerification(user: User) {
 
 function profileFromAuthUser(user: User): Profile {
   const email = user.email ?? "";
+  const credits = readJson<Record<string, number>>(USER_CREDITS_KEY, {});
   const state = readJson<Record<string, Partial<Pick<Profile, "role" | "disabled" | "updated_at">>>>(
     USERS_STATE_KEY,
     {}
@@ -104,6 +108,7 @@ function profileFromAuthUser(user: User): Profile {
     full_name: user.displayName || email.split("@")[0] || "Fashion User",
     role: (overrides.role ?? (ADMIN_EMAILS.has(email) ? "admin" : "user")) as UserRole,
     disabled: overrides.disabled ?? false,
+    credits: credits[email.toLowerCase()] ?? 0,
     created_at: createdAt,
     updated_at: overrides.updated_at ?? updatedAt
   };
@@ -318,8 +323,21 @@ export async function getPayments(currentUser?: Profile) {
 export async function savePayment(input: PaymentInput, paymentId?: string) {
   const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
   const timestamp = now();
+  const duplicate = payments.find((payment) => {
+    if (payment.id === paymentId) return false;
+    const sameInvoice = normalizeKey(payment.invoice_number) === normalizeKey(input.invoice_number);
+    const samePayment = normalizeKey(payment.payment_id) === normalizeKey(input.payment_id);
+    const sameTransaction = normalizeKey(payment.transaction_id) === normalizeKey(input.transaction_id);
+    return sameInvoice || samePayment || sameTransaction;
+  });
+  if (duplicate) throw new Error("This invoice has already been uploaded.");
+  const previousPayment = paymentId ? payments.find((payment) => payment.id === paymentId) : null;
 
   if (paymentId) {
+    const previousCredits = Number(previousPayment?.credits || 0);
+    const nextCredits = Number(input.credits || 0);
+    const customerChanged =
+      previousPayment && normalizeKey(previousPayment.customer_email) !== normalizeKey(input.customer_email);
     writeJson(
       PAYMENTS_KEY,
       payments.map((payment) =>
@@ -332,6 +350,32 @@ export async function savePayment(input: PaymentInput, paymentId?: string) {
           : payment
       )
     );
+    if (customerChanged && previousPayment) {
+      updateCredits(previousPayment.customer_email, -previousCredits);
+      const totalCredits = updateCredits(input.customer_email, nextCredits);
+      appendCreditLedger({
+        customer_email: input.customer_email,
+        payment_id: input.payment_id,
+        invoice_number: input.invoice_number,
+        credits_added: nextCredits,
+        total_credits: totalCredits,
+        created_at: timestamp
+      });
+    } else {
+      const delta = nextCredits - previousCredits;
+      const totalCredits = updateCredits(input.customer_email, delta);
+      if (delta !== 0) {
+        appendCreditLedger({
+          customer_email: input.customer_email,
+          payment_id: input.payment_id,
+          invoice_number: input.invoice_number,
+          credits_added: delta,
+          total_credits: totalCredits,
+          created_at: timestamp
+        });
+      }
+    }
+    window.dispatchEvent(new Event("credits-updated"));
     return;
   }
 
@@ -343,13 +387,58 @@ export async function savePayment(input: PaymentInput, paymentId?: string) {
     profiles: null
   };
   writeJson(PAYMENTS_KEY, [payment, ...payments]);
+  const totalCredits = updateCredits(input.customer_email, Number(input.credits || 0));
+  appendCreditLedger({
+    customer_email: input.customer_email,
+    payment_id: input.payment_id,
+    invoice_number: input.invoice_number,
+    credits_added: Number(input.credits || 0),
+    total_credits: totalCredits,
+    created_at: timestamp
+  });
+  window.dispatchEvent(new Event("credits-updated"));
 }
 
 export async function deletePayment(paymentId: string) {
+  const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
+  const payment = payments.find((item) => item.id === paymentId);
+  if (payment) updateCredits(payment.customer_email, -Number(payment.credits || 0));
   writeJson(
     PAYMENTS_KEY,
-    readJson<Payment[]>(PAYMENTS_KEY, []).filter((payment) => payment.id !== paymentId)
+    payments.filter((payment) => payment.id !== paymentId)
   );
+}
+
+export async function getUserCredits(email: string) {
+  return readJson<Record<string, number>>(USER_CREDITS_KEY, {})[email.toLowerCase()] ?? 0;
+}
+
+function updateCredits(email: string, delta: number) {
+  const key = email.toLowerCase();
+  const credits = readJson<Record<string, number>>(USER_CREDITS_KEY, {});
+  const total = Math.max(0, Number(credits[key] || 0) + delta);
+  writeJson(USER_CREDITS_KEY, {
+    ...credits,
+    [key]: total
+  });
+  return total;
+}
+
+function appendCreditLedger(entry: Omit<CreditLedgerEntry, "id">) {
+  const ledger = readJson<CreditLedgerEntry[]>(CREDIT_LEDGER_KEY, []);
+  writeJson(CREDIT_LEDGER_KEY, [{ ...entry, id: id("ledger") }, ...ledger]);
+}
+
+export async function getCreditLedger(email?: string) {
+  const ledger = readJson<CreditLedgerEntry[]>(CREDIT_LEDGER_KEY, []);
+  const normalizedEmail = email?.toLowerCase();
+  return (normalizedEmail ? ledger.filter((entry) => entry.customer_email.toLowerCase() === normalizedEmail) : ledger).sort(
+    (a, b) => b.created_at.localeCompare(a.created_at)
+  );
+}
+
+function normalizeKey(value: string) {
+  return value.trim().toLowerCase();
 }
 
 export async function getPurchases(currentUser?: Profile) {

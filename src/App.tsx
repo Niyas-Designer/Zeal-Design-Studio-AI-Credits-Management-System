@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
 import {
   AlertTriangle,
   CalendarDays,
@@ -50,10 +50,12 @@ import {
   deletePayment,
   deletePurchase,
   deleteUsage,
+  getCreditLedger,
   getPayments,
   getPurchases,
   getUsage,
   getUsageCategories,
+  getUserCredits,
   getUsers,
   onAuthChange,
   savePayment,
@@ -69,7 +71,7 @@ import {
   updateUserRole
 } from "@/lib/data-store";
 import { PLATFORMS, SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
-import type { AiUsage, CreditPurchase, InvoiceFile, Payment, PaymentMethod, PaymentStatus, Platform, Profile } from "@/lib/types";
+import type { AiUsage, CreditLedgerEntry, CreditPurchase, InvoiceFile, Payment, PaymentMethod, Platform, Profile } from "@/lib/types";
 import {
   aiUsageSchema,
   forgotPasswordSchema,
@@ -770,10 +772,15 @@ function FacebookIcon() {
 function DashboardPage({ profile }: { profile: Profile }) {
   const [records, setRecords] = useState<AiUsage[]>([]);
   const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+  const [currentCredits, setCurrentCredits] = useState(0);
 
   useEffect(() => {
     loadUsage(profile, setRecords);
     getPurchases(profile).then(setPurchases).catch(console.error);
+    const refreshCredits = () => getUserCredits(profile.email).then(setCurrentCredits).catch(console.error);
+    refreshCredits();
+    window.addEventListener("credits-updated", refreshCredits);
+    return () => window.removeEventListener("credits-updated", refreshCredits);
   }, [profile]);
 
   const stats = getDashboardStats(records, purchases);
@@ -795,6 +802,7 @@ function DashboardPage({ profile }: { profile: Profile }) {
         <KpiCard title="Total Entries" value={stats.totalEntries} icon={ListChecks} />
         <KpiCard title="Monthly Usage" value={stats.monthlyUsage} icon={CalendarDays} />
         <KpiCard title="Monthly Purchase" value={stats.monthlyPurchase} icon={Coins} />
+        <KpiCard title="Current Credits" value={currentCredits} icon={CreditCard} />
       </section>
       <CreditProgressCard purchased={stats.totalBuyCredits} used={stats.totalCreditsUsed} remaining={stats.remainingCredits} percentage={stats.usagePercentage} />
       <section className="mt-6 grid gap-6 xl:grid-cols-2">
@@ -1123,6 +1131,40 @@ function InvoiceViewer({ purchase, onOpenChange, onReplaced }: { purchase: Credi
   );
 }
 
+function PaymentInvoiceViewer({ invoice, onOpenChange }: { invoice: InvoiceFile | null; onOpenChange: (open: boolean) => void }) {
+  const [zoom, setZoom] = useState(1);
+  return (
+    <Dialog open={!!invoice} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-4xl">
+        <DialogHeader><DialogTitle>{invoice?.name ?? "Invoice"}</DialogTitle></DialogHeader>
+        {invoice ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" variant="outline" onClick={() => setZoom((value) => Math.min(value + 0.15, 2))}>Zoom In</Button>
+              <Button type="button" variant="outline" onClick={() => setZoom((value) => Math.max(value - 0.15, 0.6))}>Zoom Out</Button>
+              <Button type="button" variant="outline" onClick={() => downloadInvoice(invoice)}><Download className="h-4 w-4" />Download</Button>
+              <Button type="button" variant="outline" onClick={() => window.print()}>Print</Button>
+            </div>
+            <InvoicePreview invoice={invoice} zoom={zoom} large />
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function InvoicePreview({ invoice, zoom = 1, large }: { invoice: InvoiceFile; zoom?: number; large?: boolean }) {
+  return (
+    <div className={cn("overflow-auto rounded-md border bg-muted p-3", large ? "max-h-[72vh]" : "max-h-80")}>
+      {invoice.type === "application/pdf" ? (
+        <iframe title={invoice.name} src={invoice.data_url} className={cn("w-full rounded bg-white", large ? "h-[70vh]" : "h-72")} style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }} />
+      ) : (
+        <img src={invoice.data_url} alt={invoice.name} className="mx-auto max-h-[70vh] rounded bg-white object-contain" style={{ transform: `scale(${zoom})`, transformOrigin: "top center" }} />
+      )}
+    </div>
+  );
+}
+
 function fileToDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -1137,6 +1179,43 @@ function downloadInvoice(invoice: InvoiceFile) {
   anchor.href = invoice.data_url;
   anchor.download = invoice.name;
   anchor.click();
+}
+
+function generateInvoiceNumber() {
+  return `INV-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function extractInvoiceData(filename: string) {
+  const source = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
+  const invoice = source.match(/\b(?:inv|invoice)\s*([a-z0-9]+)/i)?.[1];
+  const amount = source.match(/(?:₹|rs|inr|usd|\$)?\s*(\d+(?:\.\d{1,2})?)\s*(?:inr|usd|rs)?/i)?.[1];
+  const credits = source.match(/(\d+)\s*(?:credits|credit|cr)\b/i)?.[1];
+  const email = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  const vendor = detectVendor(source);
+  const values: Partial<PaymentFormValues> = {
+    invoice_number: invoice ? `INV-${invoice.toUpperCase()}` : generateInvoiceNumber(),
+    vendor,
+    customer_email: email ?? "",
+    customer_name: email ? email.split("@")[0].replace(/[._-]+/g, " ") : "",
+    amount: amount ? Number(amount) : 0,
+    credits: credits ? Number(credits) : 0,
+    currency: source.toLowerCase().includes("usd") || source.includes("$") ? "USD" : "INR",
+    payment_id: source.match(/\bpay(?:ment)?\s*([a-z0-9]+)/i)?.[1] ?? `PAY-${Date.now()}`,
+    transaction_id: source.match(/\btxn\s*([a-z0-9]+)/i)?.[1] ?? `TXN-${Date.now()}`,
+    order_id: source.match(/\border\s*([a-z0-9]+)/i)?.[1] ?? `ORD-${Date.now()}`,
+    paid_at: new Date().toISOString().slice(0, 16)
+  };
+  const populated = Object.values(values).filter((value) => value !== "" && value !== 0).length;
+  return { values, confidence: Math.min(96, Math.max(42, populated * 11)) };
+}
+
+function detectVendor(text: string) {
+  const vendors = ["OpenAI", "Anthropic", "Claude", "Gemini", "Grok", "Midjourney", "Freepik", "Leonardo AI", "Adobe Firefly", "Stability AI", "Runway", "Flux"];
+  return vendors.find((vendor) => text.toLowerCase().includes(vendor.toLowerCase().replace(" ai", ""))) ?? "";
 }
 
 function UsagePage({ profile }: { profile: Profile }) {
@@ -1450,14 +1529,21 @@ function ReportsPage({ profile }: { profile: Profile }) {
 
 function PaymentsPage({ profile }: { profile: Profile }) {
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [ledger, setLedger] = useState<CreditLedgerEntry[]>([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Payment | null>(null);
+  const [invoicePreview, setInvoicePreview] = useState<InvoiceFile | null>(null);
   const [search, setSearch] = useState("");
   const { toast } = useToast();
 
   async function refresh() {
     try {
-      setPayments(await getPayments(profile));
+      const [nextPayments, nextLedger] = await Promise.all([
+        getPayments(profile),
+        getCreditLedger(profile.role === "admin" ? undefined : profile.email)
+      ]);
+      setPayments(nextPayments);
+      setLedger(nextLedger);
     } catch (error) {
       toast({ title: "Payments failed", description: getError(error), variant: "destructive" });
     }
@@ -1468,12 +1554,15 @@ function PaymentsPage({ profile }: { profile: Profile }) {
   }, [profile]);
 
   const filtered = payments.filter((payment) =>
-    `${payment.customer_name} ${payment.customer_email} ${payment.payment_id} ${payment.transaction_id} ${payment.order_id}`.toLowerCase().includes(search.toLowerCase())
+    `${payment.customer_name} ${payment.customer_email} ${payment.payment_id} ${payment.transaction_id} ${payment.order_id} ${payment.invoice_number} ${payment.vendor}`.toLowerCase().includes(search.toLowerCase())
+  );
+  const filteredLedger = ledger.filter((entry) =>
+    `${entry.customer_email} ${entry.payment_id} ${entry.invoice_number}`.toLowerCase().includes(search.toLowerCase())
   );
 
   function exportPayments() {
-    const header = ["Customer", "Email", "Payment ID", "Transaction ID", "Order ID", "Amount", "Currency", "Method", "Status", "Invoice"];
-    const rows = filtered.map((p) => [p.customer_name, p.customer_email, p.payment_id, p.transaction_id, p.order_id, p.amount, p.currency, p.payment_method, p.payment_status, p.invoice_number]);
+    const header = ["Customer", "Email", "Payment ID", "Transaction ID", "Order ID", "Amount", "Currency", "Credits", "Method", "Vendor", "Invoice"];
+    const rows = filtered.map((p) => [p.customer_name, p.customer_email, p.payment_id, p.transaction_id, p.order_id, p.amount, p.currency, p.credits, p.payment_method, p.vendor, p.invoice_number]);
     const csv = [header, ...rows].map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
@@ -1496,16 +1585,22 @@ function PaymentsPage({ profile }: { profile: Profile }) {
         </CardContent>
       </Card>
       <DataTable
-        headers={["Customer", "Payment ID", "Order", "Amount", "Method", "Status", "Invoice", "Date", ""]}
+        headers={["Customer", "Payment ID", "Order", "Amount Paid", "Credits", "Method", "Vendor", "Invoice", "Date", ""]}
         empty="No payments found."
         rows={filtered.map((payment) => [
           `${payment.customer_name} (${payment.customer_email})`,
           payment.payment_id,
           payment.order_id,
           `${payment.currency} ${formatNumber(payment.amount)}`,
+          formatNumber(payment.credits ?? 0),
           payment.payment_method,
-          payment.payment_status,
-          payment.invoice_number,
+          payment.vendor,
+          payment.invoice_file ? (
+            <div className="flex gap-2" key={`${payment.id}-invoice`}>
+              <Button size="sm" variant="outline" onClick={() => setInvoicePreview(payment.invoice_file)}>View Invoice</Button>
+              <Button size="sm" variant="outline" onClick={() => downloadInvoice(payment.invoice_file!)}>Download</Button>
+            </div>
+          ) : payment.invoice_number,
           formatDate(payment.paid_at),
           <div className="flex gap-2" key={payment.id}>
             <Button variant="outline" size="sm" onClick={() => { setEditing(payment); setOpen(true); }}>View/Edit</Button>
@@ -1513,18 +1608,37 @@ function PaymentsPage({ profile }: { profile: Profile }) {
           </div>
         ])}
       />
+      <div className="mt-6 space-y-3">
+        <h2 className="text-lg font-semibold">Credit Ledger</h2>
+        <DataTable
+          headers={["Date", "Customer", "Invoice", "Credits Added", "Total Credits"]}
+          empty="No credit ledger entries found."
+          rows={filteredLedger.map((entry) => [
+            formatDate(entry.created_at),
+            entry.customer_email,
+            entry.invoice_number,
+            `${entry.credits_added >= 0 ? "+" : ""}${formatNumber(entry.credits_added)}`,
+            formatNumber(entry.total_credits)
+          ])}
+        />
+      </div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader><DialogTitle>{editing ? "Payment Details" : "New Payment"}</DialogTitle></DialogHeader>
           <PaymentForm currentUser={profile} payment={editing} onDone={() => { setOpen(false); refresh(); }} />
         </DialogContent>
       </Dialog>
+      <PaymentInvoiceViewer invoice={invoicePreview} onOpenChange={(open) => !open && setInvoicePreview(null)} />
     </>
   );
 }
 
 function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; payment: Payment | null; onDone: () => void }) {
   const { toast } = useToast();
+  const [invoice, setInvoice] = useState<InvoiceFile | null>(payment?.invoice_file ?? null);
+  const [processingStep, setProcessingStep] = useState("");
+  const [confidence, setConfidence] = useState<number | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
   const form = useForm<PaymentFormValues>({
     resolver: zodResolver(paymentSchema),
     defaultValues: payment
@@ -1535,10 +1649,10 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
           transaction_id: payment.transaction_id,
           order_id: payment.order_id,
           amount: payment.amount,
+          credits: payment.credits ?? 0,
           currency: payment.currency,
           payment_method: payment.payment_method,
-          payment_detail: payment.payment_detail ?? "",
-          payment_status: payment.payment_status,
+          vendor: payment.vendor ?? "",
           paid_at: payment.paid_at.slice(0, 16),
           invoice_number: payment.invoice_number,
           notes: payment.notes ?? ""
@@ -1550,20 +1664,63 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
           transaction_id: "",
           order_id: "",
           amount: 0,
+          credits: 0,
           currency: "INR",
           payment_method: "UPI",
-          payment_detail: "",
-          payment_status: "Pending",
           paid_at: new Date().toISOString().slice(0, 16),
-          invoice_number: `INV-${Date.now()}`,
+          vendor: "",
+          invoice_number: generateInvoiceNumber(),
           notes: ""
         }
   });
 
+  async function handleInvoiceUpload(file?: File) {
+    if (!file) return;
+    if (!["application/pdf", "image/jpeg", "image/png"].includes(file.type)) {
+      toast({ title: "Invalid invoice file", description: "Upload PDF, PNG, JPG, or JPEG only.", variant: "destructive" });
+      return;
+    }
+    setProcessingStep("Uploading Invoice...");
+    const data_url = await fileToDataUrl(file);
+    const nextInvoice: InvoiceFile = { name: file.name, type: file.type, size: file.size, data_url, uploaded_at: new Date().toISOString() };
+    setInvoice(nextInvoice);
+    setProcessingStep("Reading Invoice...");
+    await wait(300);
+    setProcessingStep("Extracting Data...");
+    await wait(300);
+    const extracted = extractInvoiceData(file.name);
+    Object.entries(extracted.values).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") form.setValue(key as keyof PaymentFormValues, value as never, { shouldValidate: true });
+    });
+    setProcessingStep("Almost Done...");
+    await wait(250);
+    setConfidence(extracted.confidence);
+    setProcessingStep("");
+  }
+
+  function handleDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setIsDragging(false);
+    handleInvoiceUpload(event.dataTransfer.files?.[0]);
+  }
+
   async function onSubmit(values: PaymentFormValues) {
+    if (!invoice) {
+      toast({ title: "Invoice required", description: "Upload an invoice before saving.", variant: "destructive" });
+      return;
+    }
     try {
-      await savePayment({ ...values, user_id: payment?.user_id ?? currentUser.id, payment_detail: values.payment_detail || null, notes: values.notes || null }, payment?.id);
-      toast({ title: payment ? "Payment updated" : "Payment created" });
+      await savePayment({
+        ...values,
+        user_id: payment?.user_id ?? currentUser.id,
+        payment_detail: null,
+        payment_status: "Paid",
+        invoice_file: invoice,
+        invoice_file_url: invoice.data_url,
+        notes: values.notes || null
+      }, payment?.id);
+      const credits = await getUserCredits(values.customer_email);
+      toast({ title: "Payment Saved Successfully", description: `Credits Updated. Current Credits: ${formatNumber(credits)} Credits` });
       onDone();
     } catch (error) {
       toast({ title: "Payment save failed", description: getError(error), variant: "destructive" });
@@ -1572,27 +1729,54 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
 
   return (
     <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      <div className="sm:col-span-2">
+        <Label>Upload Invoice</Label>
+        <div className="mt-2 rounded-md border border-dashed p-5">
+          <label
+            className={cn(
+              "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md bg-muted/35 p-6 text-center text-sm text-muted-foreground transition",
+              isDragging && "border border-[#E53935] bg-[#E53935]/10 text-foreground"
+            )}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setIsDragging(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+          >
+            <FileUp className="h-8 w-8 text-[#E53935]" />
+            <span className="font-semibold text-foreground">Drag & Drop</span>
+            <span>or Choose File</span>
+            <span className="text-xs">Supported Files: PDF, PNG, JPG, JPEG</span>
+            <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleInvoiceUpload(event.target.files?.[0])} />
+          </label>
+          {processingStep ? <p className="mt-3 text-sm font-medium text-[#E53935]">{processingStep}</p> : null}
+          {confidence != null ? <p className="mt-3 text-xs text-muted-foreground">Extraction confidence: {confidence}%</p> : null}
+          {invoice ? (
+            <div className="mt-4 space-y-4">
+              <InvoiceUpload invoice={invoice} onInvoice={setInvoice} />
+              <InvoicePreview invoice={invoice} />
+            </div>
+          ) : null}
+        </div>
+      </div>
       <Field label="Customer Name" error={form.formState.errors.customer_name?.message}><Input {...form.register("customer_name")} /></Field>
       <Field label="Customer Email" error={form.formState.errors.customer_email?.message}><Input type="email" {...form.register("customer_email")} /></Field>
       <Field label="Payment ID" error={form.formState.errors.payment_id?.message}><Input {...form.register("payment_id")} /></Field>
       <Field label="Transaction ID" error={form.formState.errors.transaction_id?.message}><Input {...form.register("transaction_id")} /></Field>
       <Field label="Order ID" error={form.formState.errors.order_id?.message}><Input {...form.register("order_id")} /></Field>
-      <Field label="Amount" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
+      <Field label="Amount Paid" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
+      <Field label="Credits Purchased" error={form.formState.errors.credits?.message}><Input type="number" min="1" {...form.register("credits")} /></Field>
       <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
+      <Field label="AI Platform / Vendor Name" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
       <Field label="Payment Method">
         <Select value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod)}>
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>{["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
         </Select>
       </Field>
-      <Field label="UPI ID / Bank / Card Type"><Input {...form.register("payment_detail")} /></Field>
-      <Field label="Status">
-        <Select value={form.watch("payment_status")} onValueChange={(value) => form.setValue("payment_status", value as PaymentStatus)}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>{["Pending", "Paid", "Failed", "Refunded"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
-        </Select>
-      </Field>
-      <Field label="Date & Time" error={form.formState.errors.paid_at?.message}><Input type="datetime-local" {...form.register("paid_at")} /></Field>
+      <Field label="Current Server Time" error={form.formState.errors.paid_at?.message}><Input type="datetime-local" {...form.register("paid_at")} /></Field>
       <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input {...form.register("invoice_number")} /></Field>
       <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
       <div className="flex justify-end gap-2 sm:col-span-2">
