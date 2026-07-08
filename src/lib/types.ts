@@ -67,6 +67,8 @@ export type Payment = {
   payment_detail: string | null;
   payment_status: PaymentStatus;
   credits: number;
+  tax_amount: number;
+  total_amount: number;
   invoice_file_url: string | null;
   invoice_file: InvoiceFile | null;
   vendor: string;
@@ -108,6 +110,8 @@ export type CreditPurchase = {
   vendor: string;
   notes: string | null;
   invoice_file: InvoiceFile | null;
+  extracted_json: Record<string, unknown> | null;
+  ocr_text: string | null;
   created_at: string;
   updated_at: string;
   profiles?: Pick<Profile, "email" | "full_name"> | null;

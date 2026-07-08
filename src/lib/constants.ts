@@ -1,7 +1,7 @@
 export const PLATFORMS = [
   "ChatGPT",
   "Claude",
-  "Freepik",
+  "Magnific",
   "Midjourney",
   "Gemini",
   "Flux",

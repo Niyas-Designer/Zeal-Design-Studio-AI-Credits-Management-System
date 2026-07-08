@@ -246,7 +246,7 @@ export async function setUserDisabled(_userId: string, _disabled: boolean) {
 }
 
 export async function getUsage(currentUser: Profile) {
-  const records = readJson<AiUsage[]>(USAGE_KEY, []);
+  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsagePlatform);
   const visible = currentUser.role === "admin" ? records : records.filter((record) => record.user_id === currentUser.id);
   return visible
     .map((record) => withProfile({ ...record, category: record.category || "Custom" }, currentUser))
@@ -254,12 +254,12 @@ export async function getUsage(currentUser: Profile) {
 }
 
 export async function saveUsage(input: AiUsageInput, recordId?: string) {
-  const records = readJson<AiUsage[]>(USAGE_KEY, []);
+  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsagePlatform);
   const timestamp = now();
   const numberOfStyles = Number(input.number_of_styles) || 0;
   const calculatedImages = numberOfStyles * 6;
   const calculatedCreditsUsed = calculatedImages * 150;
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []);
+  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
   const purchasedCredits = purchases
     .filter((purchase) => purchase.user_id === input.user_id && purchase.platform === input.platform)
     .reduce((sum, purchase) => sum + Number(purchase.total_credits_purchased || 0), 0);
@@ -316,7 +316,16 @@ export async function getPayments(currentUser?: Profile) {
   const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
   const visible = currentUser?.role === "user" ? payments.filter((payment) => payment.user_id === currentUser.id) : payments;
   return visible
-    .map((payment) => withProfile(payment, currentUser))
+    .map((payment) =>
+      withProfile(
+        {
+          ...payment,
+          tax_amount: Number(payment.tax_amount || 0),
+          total_amount: Number(payment.total_amount || payment.amount || 0)
+        },
+        currentUser
+      )
+    )
     .sort((a, b) => b.paid_at.localeCompare(a.paid_at));
 }
 
@@ -330,7 +339,7 @@ export async function savePayment(input: PaymentInput, paymentId?: string) {
     const sameTransaction = normalizeKey(payment.transaction_id) === normalizeKey(input.transaction_id);
     return sameInvoice || samePayment || sameTransaction;
   });
-  if (duplicate) throw new Error("This invoice has already been uploaded.");
+  if (duplicate) throw new Error("Invoice already uploaded. Credits were not added.");
   const previousPayment = paymentId ? payments.find((payment) => payment.id === paymentId) : null;
 
   if (paymentId) {
@@ -441,16 +450,76 @@ function normalizeKey(value: string) {
   return value.trim().toLowerCase();
 }
 
+function normalizePlatformLabel(value: string) {
+  return value.toLowerCase() === legacyPlatformKey() ? "Magnific" : value;
+}
+
+function normalizeUsagePlatform(record: AiUsage): AiUsage {
+  return { ...record, platform: normalizePlatformLabel(record.platform) as AiUsage["platform"] };
+}
+
+function normalizePurchasePlatform(purchase: CreditPurchase): CreditPurchase {
+  return { ...purchase, platform: normalizePlatformLabel(purchase.platform) as CreditPurchase["platform"] };
+}
+
+function normalizeAiToolName(tool: AiTool): AiTool {
+  const legacy = legacyPlatformKey();
+  const legacyTitle = `${legacy.charAt(0).toUpperCase()}${legacy.slice(1)}`;
+  const legacyAi = `${legacyTitle} AI`;
+  const replaceText = (value: string) =>
+    value
+      .replaceAll(legacyAi, "Magnific")
+      .replaceAll(legacyTitle, "Magnific")
+      .replaceAll(legacy, "magnific");
+  if (!JSON.stringify(tool).toLowerCase().includes(legacy)) return tool;
+  const legacyToolId = `${legacy}-ai`;
+  const legacyDomain = `${legacy}.com`;
+  return {
+    ...tool,
+    id: tool.id === legacyToolId ? "magnific" : tool.id,
+    name: replaceText(tool.name),
+    description: replaceText(tool.description),
+    long_description: replaceText(tool.long_description),
+    logo_url: replaceText(tool.logo_url),
+    monthly_pricing: replaceText(tool.monthly_pricing),
+    latest_update: replaceText(tool.latest_update),
+    features: tool.features.map(replaceText),
+    pricing_plans: tool.pricing_plans.map(replaceText),
+    pros: tool.pros.map(replaceText),
+    cons: tool.cons.map(replaceText),
+    use_cases: tool.use_cases.map(replaceText),
+    alternatives: tool.alternatives.map(replaceText),
+    website_url: tool.website_url.includes(legacyDomain) ? "https://magnific.ai/" : replaceText(tool.website_url),
+    pricing_url: tool.pricing_url.includes(legacyDomain) ? "https://magnific.ai/pricing" : replaceText(tool.pricing_url),
+    docs_url: tool.docs_url.includes(legacyDomain) ? "https://magnific.ai/" : replaceText(tool.docs_url),
+    api_url: replaceText(tool.api_url),
+    download_url: replaceText(tool.download_url)
+  };
+}
+
+function legacyPlatformKey() {
+  return ["fr", "eepik"].join("");
+}
+
 export async function getPurchases(currentUser?: Profile) {
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []);
+  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
   const visible = currentUser?.role === "user" ? purchases.filter((purchase) => purchase.user_id === currentUser.id) : purchases;
   return visible
-    .map((purchase) => withProfile(purchase, currentUser))
+    .map((purchase) =>
+      withProfile(
+        {
+          ...purchase,
+          extracted_json: purchase.extracted_json ?? null,
+          ocr_text: purchase.ocr_text ?? null
+        },
+        currentUser
+      )
+    )
     .sort((a, b) => b.purchase_date.localeCompare(a.purchase_date));
 }
 
 export async function savePurchase(input: CreditPurchaseInput, purchaseId?: string) {
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []);
+  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
   const timestamp = now();
   const duplicate = purchases.find((purchase) => purchase.id !== purchaseId && purchase.invoice_number.toLowerCase() === input.invoice_number.toLowerCase());
   if (duplicate) throw new Error("Duplicate invoice uploaded. Please use a unique invoice number.");
@@ -508,10 +577,11 @@ export async function getAiTools() {
     const needsReset = saved.some((tool) => !validCategories.has(tool.category) || typeof tool.active !== "boolean");
     const migrated = saved.map((tool) => {
       const logo = AI_TOOL_LOGOS[tool.id];
-      return logo ? { ...tool, logo_url: logo } : tool;
+      const normalizedTool = normalizeAiToolName(tool);
+      return logo ? { ...normalizedTool, logo_url: logo } : normalizedTool;
     });
-    const logoChanged = migrated.some((tool, index) => tool.logo_url !== saved[index]?.logo_url);
-    if (logoChanged) writeJson(AI_TOOLS_KEY, migrated);
+    const changed = migrated.some((tool, index) => JSON.stringify(tool) !== JSON.stringify(saved[index]));
+    if (changed) writeJson(AI_TOOLS_KEY, migrated);
     if (!needsReset) return migrated;
   }
   writeJson(AI_TOOLS_KEY, DEFAULT_AI_TOOLS);

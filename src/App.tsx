@@ -94,7 +94,7 @@ const APPLE_LOGO = "/apple-logo-black.svg";
 const IMAGES_PER_STYLE = 6;
 const CREDITS_PER_IMAGE = 150;
 const DEFAULT_PLATFORM_CREDIT_PACKS: Partial<Record<Platform, number>> = {
-  Freepik: 45000
+  Magnific: 45000
 };
 
 const FASHION_SLIDES = [
@@ -772,15 +772,32 @@ function FacebookIcon() {
 function DashboardPage({ profile }: { profile: Profile }) {
   const [records, setRecords] = useState<AiUsage[]>([]);
   const [purchases, setPurchases] = useState<CreditPurchase[]>([]);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [ledger, setLedger] = useState<CreditLedgerEntry[]>([]);
   const [currentCredits, setCurrentCredits] = useState(0);
 
   useEffect(() => {
-    loadUsage(profile, setRecords);
-    getPurchases(profile).then(setPurchases).catch(console.error);
-    const refreshCredits = () => getUserCredits(profile.email).then(setCurrentCredits).catch(console.error);
-    refreshCredits();
-    window.addEventListener("credits-updated", refreshCredits);
-    return () => window.removeEventListener("credits-updated", refreshCredits);
+    const refreshDashboard = async () => {
+      try {
+        const [nextUsage, nextPurchases, nextPayments, nextLedger, credits] = await Promise.all([
+          getUsage(profile),
+          getPurchases(profile),
+          getPayments(profile),
+          getCreditLedger(profile.role === "admin" ? undefined : profile.email),
+          getUserCredits(profile.email)
+        ]);
+        setRecords(nextUsage);
+        setPurchases(nextPurchases);
+        setPayments(nextPayments);
+        setLedger(nextLedger);
+        setCurrentCredits(credits);
+      } catch (error) {
+        console.error(error);
+      }
+    };
+    refreshDashboard();
+    window.addEventListener("credits-updated", refreshDashboard);
+    return () => window.removeEventListener("credits-updated", refreshDashboard);
   }, [profile]);
 
   const stats = getDashboardStats(records, purchases);
@@ -789,6 +806,14 @@ function DashboardPage({ profile }: { profile: Profile }) {
   const daily = getDailyActivity(records);
   const categories = getCategorySeries(records);
   const suppliers = getSupplierUsage(records);
+  const today = new Date().toISOString().slice(0, 10);
+  const creditsAddedToday = ledger
+    .filter((entry) => entry.created_at.slice(0, 10) === today && entry.credits_added > 0)
+    .reduce((sum, entry) => sum + entry.credits_added, 0);
+  const lastPayment = payments[0];
+  const nextExpiry = purchases
+    .filter((purchase) => purchase.expiry_date)
+    .sort((a, b) => String(a.expiry_date).localeCompare(String(b.expiry_date)))[0];
 
   return (
     <>
@@ -803,6 +828,8 @@ function DashboardPage({ profile }: { profile: Profile }) {
         <KpiCard title="Monthly Usage" value={stats.monthlyUsage} icon={CalendarDays} />
         <KpiCard title="Monthly Purchase" value={stats.monthlyPurchase} icon={Coins} />
         <KpiCard title="Current Credits" value={currentCredits} icon={CreditCard} />
+        <KpiCard title="Credits Added Today" value={creditsAddedToday} icon={Plus} />
+        <KpiCard title="Last Purchase Credits" value={lastPayment?.credits ?? 0} icon={Wallet} />
       </section>
       <CreditProgressCard purchased={stats.totalBuyCredits} used={stats.totalCreditsUsed} remaining={stats.remainingCredits} percentage={stats.usagePercentage} />
       <section className="mt-6 grid gap-6 xl:grid-cols-2">
@@ -818,6 +845,16 @@ function DashboardPage({ profile }: { profile: Profile }) {
         <SummaryList title="Top Categories" rows={categories.slice(0, 6).map((item) => [item.category, formatNumber(item.creditsUsed)])} />
         <SummaryList title="Top Suppliers" rows={suppliers.slice(0, 6).map((item) => [item.supplier, formatNumber(item.creditsUsed)])} />
         <SummaryList title="Latest Purchases" rows={purchases.slice(0, 6).map((item) => [`${item.platform} · ${item.invoice_number}`, formatNumber(item.total_credits_purchased)])} empty="No purchases yet." />
+        <SummaryList
+          title="Recent Payment"
+          rows={lastPayment ? [
+            ["Invoice", lastPayment.invoice_number],
+            ["Vendor", lastPayment.vendor],
+            ["Amount", `${lastPayment.currency} ${formatNumber(lastPayment.total_amount || lastPayment.amount)}`],
+            ["Next Expiry", nextExpiry?.expiry_date ? formatDate(nextExpiry.expiry_date) : "Not set"]
+          ] : []}
+          empty="No recent payment."
+        />
       </section>
     </>
   );
@@ -980,6 +1017,11 @@ function PurchaseAlerts({ purchases, usage }: { purchases: CreditPurchase[]; usa
 function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile; purchase: CreditPurchase | null; onDone: () => void }) {
   const { toast } = useToast();
   const [invoice, setInvoice] = useState<InvoiceFile | null>(purchase?.invoice_file ?? null);
+  const [extractedJson, setExtractedJson] = useState<Record<string, unknown> | null>(purchase?.extracted_json ?? null);
+  const [ocrText, setOcrText] = useState(purchase?.ocr_text ?? "");
+  const [extractionStep, setExtractionStep] = useState("");
+  const [extractionConfidence, setExtractionConfidence] = useState<number | null>(null);
+  const [isDraggingInvoice, setIsDraggingInvoice] = useState(false);
   const form = useForm<PurchaseFormValues>({
     resolver: zodResolver(purchaseSchema),
     defaultValues: purchase
@@ -997,7 +1039,7 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
           notes: purchase.notes ?? ""
         }
       : {
-          platform: "Freepik",
+          platform: "Magnific",
           purchase_date: new Date().toISOString().slice(0, 10),
           subscription_plan: "",
           invoice_number: "",
@@ -1011,6 +1053,53 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
         }
   });
 
+  async function handlePurchaseInvoiceUpload(file?: File) {
+    if (!file) return;
+    if (!["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      toast({ title: "Invalid invoice file", description: "Upload PDF, PNG, JPG, JPEG, or WEBP only.", variant: "destructive" });
+      return;
+    }
+
+    setExtractionStep("Uploading...");
+    const [data_url, rawText] = await Promise.all([fileToDataUrl(file), readInvoiceText(file)]);
+    const nextInvoice: InvoiceFile = { name: file.name, type: file.type, size: file.size, data_url, uploaded_at: new Date().toISOString() };
+    setInvoice(nextInvoice);
+
+    setExtractionStep("Reading PDF...");
+    await wait(250);
+    setExtractionStep(file.type === "application/pdf" ? "Running OCR..." : "Running OCR...");
+    await wait(250);
+    setExtractionStep("Extracting Invoice Details...");
+    await wait(250);
+
+    const extracted = extractCreditPurchaseInvoice(file.name, rawText);
+    Object.entries(extracted.values).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") {
+        form.setValue(key as keyof PurchaseFormValues, value as never, { shouldValidate: true, shouldDirty: true });
+      }
+    });
+    form.setValue("notes", extracted.notes, { shouldValidate: true, shouldDirty: true });
+    setExtractedJson(extracted.extractedJson);
+    setOcrText(extracted.ocrText);
+    setExtractionConfidence(extracted.confidence);
+    setExtractionStep("Populating Form...");
+    await wait(250);
+    setExtractionStep("Done");
+    await wait(500);
+    setExtractionStep("");
+
+    toast({
+      title: "Invoice extracted",
+      description: extracted.confidence < 70 ? "Some fields could not be detected. Please verify before saving." : "Form populated from invoice details."
+    });
+  }
+
+  function handlePurchaseInvoiceDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setIsDraggingInvoice(false);
+    handlePurchaseInvoiceUpload(event.dataTransfer.files?.[0]);
+  }
+
   async function onSubmit(values: PurchaseFormValues) {
     try {
       await savePurchase({
@@ -1018,7 +1107,9 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
         user_id: purchase?.user_id ?? currentUser.id,
         expiry_date: values.expiry_date || null,
         notes: values.notes || null,
-        invoice_file: invoice
+        invoice_file: invoice,
+        extracted_json: extractedJson,
+        ocr_text: ocrText || null
       }, purchase?.id);
       toast({ title: purchase ? "Purchase updated" : "Purchase saved", description: invoice ? "Invoice linked to credit balance." : "Invoice missing. Add it when available." });
       onDone();
@@ -1029,6 +1120,55 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
 
   return (
     <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      <div className="sm:col-span-2">
+        <Label>Upload Invoice</Label>
+        <div className="mt-2 rounded-md border border-dashed p-5">
+          <label
+            className={cn(
+              "flex cursor-pointer flex-col items-center justify-center gap-2 rounded-md bg-muted/35 p-6 text-center text-sm text-muted-foreground transition",
+              isDraggingInvoice && "border border-[#E53935] bg-[#E53935]/10 text-foreground"
+            )}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setIsDraggingInvoice(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setIsDraggingInvoice(false)}
+            onDrop={handlePurchaseInvoiceDrop}
+          >
+            <FileUp className="h-8 w-8 text-[#E53935]" />
+            <span className="font-semibold text-foreground">Upload PDF invoice</span>
+            <span>Drag & Drop or Choose File</span>
+            <span className="text-xs">Supported Files: PDF, PNG, JPG, JPEG, WEBP</span>
+            <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handlePurchaseInvoiceUpload(event.target.files?.[0])} />
+          </label>
+          {extractionStep ? <p className="mt-3 text-sm font-medium text-[#E53935]">{extractionStep}</p> : null}
+          {extractionConfidence != null ? (
+            <p className={cn("mt-3 text-xs", extractionConfidence < 70 ? "text-[#E53935]" : "text-muted-foreground")}>
+              OCR Confidence: {extractionConfidence}%{extractionConfidence < 70 ? " - Some fields could not be detected. Please verify before saving." : ""}
+            </p>
+          ) : null}
+          {invoice ? (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-col gap-3 rounded-md border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="font-semibold">{invoice.name}</p>
+                  <p className="text-xs text-muted-foreground">{invoice.type} · {formatNumber(Math.round(invoice.size / 1024))} KB</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" onClick={() => downloadInvoice(invoice)}><Download className="h-4 w-4" />Download</Button>
+                  <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border px-4 text-sm font-medium">
+                    Replace
+                    <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handlePurchaseInvoiceUpload(event.target.files?.[0])} />
+                  </label>
+                  <Button type="button" variant="destructive" onClick={() => { setInvoice(null); setExtractedJson(null); setOcrText(""); setExtractionConfidence(null); }}>Delete</Button>
+                </div>
+              </div>
+              <InvoicePreview invoice={invoice} />
+            </div>
+          ) : null}
+        </div>
+      </div>
       <Field label="AI Platform" error={form.formState.errors.platform?.message}>
         <Select value={form.watch("platform")} onValueChange={(value) => form.setValue("platform", value as Platform, { shouldValidate: true })}>
           <SelectTrigger><SelectValue /></SelectTrigger>
@@ -1049,9 +1189,6 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
         </Select>
       </Field>
       <Field label="Vendor" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
-      <Field label="Invoice Upload" className="sm:col-span-2">
-        <InvoiceUpload invoice={invoice} onInvoice={setInvoice} />
-      </Field>
       <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
       <div className="flex justify-end gap-2 sm:col-span-2">
         <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
@@ -1065,8 +1202,8 @@ function InvoiceUpload({ invoice, onInvoice }: { invoice: InvoiceFile | null; on
   const { toast } = useToast();
   async function handleFile(file?: File) {
     if (!file) return;
-    if (!["application/pdf", "image/jpeg", "image/png"].includes(file.type)) {
-      toast({ title: "Invalid invoice file", description: "Upload PDF, JPG, or PNG only.", variant: "destructive" });
+    if (!["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      toast({ title: "Invalid invoice file", description: "Upload PDF, JPG, PNG, or WEBP only.", variant: "destructive" });
       return;
     }
     const data_url = await fileToDataUrl(file);
@@ -1085,7 +1222,7 @@ function InvoiceUpload({ invoice, onInvoice }: { invoice: InvoiceFile | null; on
             <Button type="button" variant="outline" onClick={() => downloadInvoice(invoice)}><Download className="h-4 w-4" />Download</Button>
             <label className="inline-flex h-10 cursor-pointer items-center justify-center gap-2 rounded-md border px-4 text-sm font-medium">
               Replace
-              <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleFile(event.target.files?.[0])} />
+              <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handleFile(event.target.files?.[0])} />
             </label>
             <Button type="button" variant="destructive" onClick={() => onInvoice(null)}>Delete</Button>
           </div>
@@ -1093,8 +1230,8 @@ function InvoiceUpload({ invoice, onInvoice }: { invoice: InvoiceFile | null; on
       ) : (
         <label className="flex cursor-pointer flex-col items-center justify-center gap-2 py-6 text-center text-sm text-muted-foreground">
           <FileUp className="h-6 w-6" />
-          Upload invoice PDF, JPG, or PNG
-          <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleFile(event.target.files?.[0])} />
+          Upload invoice PDF, JPG, PNG, or WEBP
+          <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handleFile(event.target.files?.[0])} />
         </label>
       )}
     </div>
@@ -1181,6 +1318,27 @@ function downloadInvoice(invoice: InvoiceFile) {
   anchor.click();
 }
 
+function readInvoiceText(file: File) {
+  return new Promise<string>((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const buffer = reader.result as ArrayBuffer;
+        const decoded = new TextDecoder("latin1").decode(buffer);
+        const readable = decoded
+          .replace(/[^\x09\x0A\x0D\x20-\x7E]+/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        resolve(readable);
+      } catch {
+        resolve("");
+      }
+    };
+    reader.onerror = () => resolve("");
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 function generateInvoiceNumber() {
   return `INV-${Date.now().toString(36).toUpperCase()}${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 }
@@ -1189,13 +1347,194 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function extractCreditPurchaseInvoice(filename: string, rawText: string) {
+  const source = `${filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ")} ${rawText}`.replace(/\s+/g, " ").trim();
+  const platform = detectPlatform(source);
+  const vendor = detectVendor(source) || platform;
+  const invoiceNumber = pickMatch(source, [
+    /\b(?:invoice|inv|receipt)\s*(?:number|no|#)?[:\s-]*([a-z0-9][a-z0-9./-]{3,})/i,
+    /\b((?:INV|FP|OPENAI|ANT|MID|RUN|CUR|GEM)[-/]?\d{3,}[-/]?\d*)\b/i
+  ]);
+  const credits = pickNumber(source, [
+    /(?:credits?|tokens?)\s*(?:purchased|added|total)?[:\s-]*([\d,]+)/i,
+    /([\d,]+)\s*(?:credits?|tokens?)\b/i
+  ]);
+  const amount = pickNumber(source, [
+    /(?:amount paid|paid|total due|total amount|grand total|amount)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+    /(?:₹|rs\.?|inr|usd|\$|aed)\s*([\d,]+(?:\.\d{1,2})?)/i
+  ]);
+  const currency = detectCurrency(source);
+  const purchaseDate = normalizeInvoiceDate(
+    pickMatch(source, [
+      /(?:invoice date|payment date|purchase date|date)[:\s-]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i,
+      /(?:invoice date|payment date|purchase date|date)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i,
+      /\b(20\d{2}[./-]\d{1,2}[./-]\d{1,2})\b/
+    ])
+  );
+  const expiryDate = normalizeInvoiceDate(
+    pickMatch(source, [
+      /(?:expiry|expires|valid until|renews on)[:\s-]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i,
+      /(?:expiry|expires|valid until|renews on)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i
+    ])
+  );
+  const plan = pickMatch(source, [
+    /(?:subscription plan|plan name|plan)[:\s-]*([a-z0-9 &+./-]{3,40})/i,
+    /\b(premium monthly|premium yearly|pro monthly|pro yearly|standard monthly|business monthly|enterprise)\b/i
+  ]);
+  const paymentMethod = detectPaymentMethod(source);
+  const extractedValues: Partial<PurchaseFormValues> = {
+    platform,
+    subscription_plan: cleanExtractedText(plan) || `${platform} Subscription`,
+    purchase_date: purchaseDate || new Date().toISOString().slice(0, 10),
+    invoice_number: invoiceNumber ? invoiceNumber.toUpperCase() : generateInvoiceNumber(),
+    currency,
+    purchase_amount: amount,
+    total_credits_purchased: credits || (platform === "Magnific" ? 45000 : 0),
+    expiry_date: expiryDate || "",
+    vendor: vendor || platform,
+    payment_method: paymentMethod
+  };
+  const confidenceFields = [
+    platform,
+    plan,
+    purchaseDate,
+    invoiceNumber,
+    currency,
+    amount,
+    credits,
+    vendor,
+    paymentMethod
+  ].filter(Boolean).length;
+  const confidence = Math.min(98, Math.max(45, Math.round((confidenceFields / 9) * 100)));
+  const notes = buildPurchaseInvoiceNotes(extractedValues, confidence, rawText);
+  return {
+    values: extractedValues,
+    notes,
+    confidence,
+    extractedJson: {
+      platform: extractedValues.platform,
+      plan: extractedValues.subscription_plan,
+      invoice_number: extractedValues.invoice_number,
+      purchase_amount: extractedValues.purchase_amount,
+      currency: extractedValues.currency,
+      credits: extractedValues.total_credits_purchased,
+      vendor: extractedValues.vendor,
+      payment_method: extractedValues.payment_method,
+      purchase_date: extractedValues.purchase_date,
+      expiry_date: extractedValues.expiry_date || null
+    },
+    ocrText: rawText || source
+  };
+}
+
+function buildPurchaseInvoiceNotes(values: Partial<PurchaseFormValues>, confidence: number, rawText: string) {
+  const summary = [
+    `Platform:`,
+    `${values.platform ?? "Not detected"}`,
+    ``,
+    `Plan:`,
+    `${values.subscription_plan ?? "Not detected"}`,
+    ``,
+    `Invoice Number:`,
+    `${values.invoice_number ?? "Not detected"}`,
+    ``,
+    `Purchase Date:`,
+    `${values.purchase_date ? formatDate(values.purchase_date) : "Not detected"}`,
+    ``,
+    `Credits Purchased:`,
+    `${values.total_credits_purchased ? formatNumber(values.total_credits_purchased) : "Not detected"}`,
+    ``,
+    `Amount Paid:`,
+    `${values.currency ?? ""} ${values.purchase_amount ? formatNumber(values.purchase_amount) : "Not detected"}`.trim(),
+    ``,
+    `Vendor:`,
+    `${values.vendor ?? "Not detected"}`,
+    ``,
+    `Payment Method:`,
+    `${values.payment_method ?? "Not detected"}`,
+    ``,
+    `Invoice uploaded automatically.`,
+    ``,
+    `OCR Confidence:`,
+    `${confidence}%`
+  ].join("\n");
+  const appendix = rawText ? `\n\nExtracted Invoice Text:\n${rawText.slice(0, 2500)}` : "";
+  return `${summary}${appendix}`;
+}
+
+function detectPlatform(text: string): Platform {
+  const lower = text.toLowerCase();
+  const match = PLATFORMS.find((platform) => lower.includes(platform.toLowerCase().replace(" ai", "")));
+  if (match) return match;
+  if (lower.includes("openai") || lower.includes("chatgpt")) return "ChatGPT";
+  if (lower.includes("anthropic") || lower.includes("claude")) return "Claude";
+  if (lower.includes("google") || lower.includes("gemini")) return "Gemini";
+  if (lower.includes("stability") || lower.includes("stable diffusion")) return "Stable Diffusion";
+  if (lower.includes("leonardo")) return "Leonardo AI";
+  return "Other";
+}
+
+function detectCurrency(text: string) {
+  const lower = text.toLowerCase();
+  if (text.includes("₹") || lower.includes("inr") || lower.includes("rs")) return "INR";
+  if (text.includes("$") || lower.includes("usd")) return "USD";
+  if (lower.includes("aed")) return "AED";
+  if (lower.includes("eur") || text.includes("€")) return "EUR";
+  return "INR";
+}
+
+function detectPaymentMethod(text: string): PaymentMethod {
+  const lower = text.toLowerCase();
+  if (lower.includes("upi")) return "UPI";
+  if (lower.includes("debit")) return "Debit Card";
+  if (lower.includes("credit card") || lower.includes("visa") || lower.includes("mastercard")) return "Credit Card";
+  if (lower.includes("net banking")) return "Net Banking";
+  if (lower.includes("bank transfer") || lower.includes("wire transfer")) return "Bank Transfer";
+  return "UPI";
+}
+
+function pickMatch(text: string, patterns: RegExp[]) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern)?.[1];
+    if (match) return cleanExtractedText(match);
+  }
+  return "";
+}
+
+function pickNumber(text: string, patterns: RegExp[]) {
+  const value = pickMatch(text, patterns);
+  return value ? Number(value.replace(/,/g, "")) || 0 : 0;
+}
+
+function cleanExtractedText(value: string) {
+  return value.replace(/\s{2,}/g, " ").replace(/[|()[\]{}]+/g, "").trim();
+}
+
+function normalizeInvoiceDate(value: string) {
+  if (!value) return "";
+  const normalized = value.trim().replace(/\./g, "/");
+  const numeric = normalized.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
+  if (numeric) {
+    const [, first, second, year] = numeric;
+    const fullYear = year.length === 2 ? `20${year}` : year;
+    return `${fullYear}-${second.padStart(2, "0")}-${first.padStart(2, "0")}`;
+  }
+  const iso = normalized.match(/^(20\d{2})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
+}
+
 function extractInvoiceData(filename: string) {
   const source = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
   const invoice = source.match(/\b(?:inv|invoice)\s*([a-z0-9]+)/i)?.[1];
   const amount = source.match(/(?:₹|rs|inr|usd|\$)?\s*(\d+(?:\.\d{1,2})?)\s*(?:inr|usd|rs)?/i)?.[1];
+  const tax = source.match(/\btax\s*(\d+(?:\.\d{1,2})?)/i)?.[1];
+  const total = source.match(/\btotal\s*(\d+(?:\.\d{1,2})?)/i)?.[1];
   const credits = source.match(/(\d+)\s*(?:credits|credit|cr)\b/i)?.[1];
   const email = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
   const vendor = detectVendor(source);
+  const invoiceDate = source.match(/\b(20\d{2})[ ./-](0?[1-9]|1[0-2])[ ./-](0?[1-9]|[12]\d|3[01])\b/)?.[0];
   const values: Partial<PaymentFormValues> = {
     invoice_number: invoice ? `INV-${invoice.toUpperCase()}` : generateInvoiceNumber(),
     vendor,
@@ -1203,18 +1542,20 @@ function extractInvoiceData(filename: string) {
     customer_name: email ? email.split("@")[0].replace(/[._-]+/g, " ") : "",
     amount: amount ? Number(amount) : 0,
     credits: credits ? Number(credits) : 0,
+    tax_amount: tax ? Number(tax) : 0,
+    total_amount: total ? Number(total) : amount ? Number(amount) : 0,
     currency: source.toLowerCase().includes("usd") || source.includes("$") ? "USD" : "INR",
     payment_id: source.match(/\bpay(?:ment)?\s*([a-z0-9]+)/i)?.[1] ?? `PAY-${Date.now()}`,
     transaction_id: source.match(/\btxn\s*([a-z0-9]+)/i)?.[1] ?? `TXN-${Date.now()}`,
     order_id: source.match(/\border\s*([a-z0-9]+)/i)?.[1] ?? `ORD-${Date.now()}`,
-    paid_at: new Date().toISOString().slice(0, 16)
+    paid_at: invoiceDate ? new Date(invoiceDate).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16)
   };
   const populated = Object.values(values).filter((value) => value !== "" && value !== 0).length;
   return { values, confidence: Math.min(96, Math.max(42, populated * 11)) };
 }
 
 function detectVendor(text: string) {
-  const vendors = ["OpenAI", "Anthropic", "Claude", "Gemini", "Grok", "Midjourney", "Freepik", "Leonardo AI", "Adobe Firefly", "Stability AI", "Runway", "Flux"];
+  const vendors = ["OpenAI", "ChatGPT", "Anthropic", "Claude", "Google Gemini", "Gemini", "Grok", "Midjourney", "Magnific", "Leonardo AI", "Adobe Firefly", "Stability AI", "Runway", "Flux", "Cursor", "GitHub Copilot"];
   return vendors.find((vendor) => text.toLowerCase().includes(vendor.toLowerCase().replace(" ai", ""))) ?? "";
 }
 
@@ -1650,6 +1991,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
           order_id: payment.order_id,
           amount: payment.amount,
           credits: payment.credits ?? 0,
+          tax_amount: payment.tax_amount ?? 0,
+          total_amount: payment.total_amount ?? payment.amount,
           currency: payment.currency,
           payment_method: payment.payment_method,
           vendor: payment.vendor ?? "",
@@ -1665,6 +2008,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
           order_id: "",
           amount: 0,
           credits: 0,
+          tax_amount: 0,
+          total_amount: 0,
           currency: "INR",
           payment_method: "UPI",
           paid_at: new Date().toISOString().slice(0, 16),
@@ -1676,8 +2021,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
 
   async function handleInvoiceUpload(file?: File) {
     if (!file) return;
-    if (!["application/pdf", "image/jpeg", "image/png"].includes(file.type)) {
-      toast({ title: "Invalid invoice file", description: "Upload PDF, PNG, JPG, or JPEG only.", variant: "destructive" });
+    if (!["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(file.type)) {
+      toast({ title: "Invalid invoice file", description: "Upload PDF, PNG, JPG, JPEG, or WEBP only.", variant: "destructive" });
       return;
     }
     setProcessingStep("Uploading Invoice...");
@@ -1686,8 +2031,10 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
     setInvoice(nextInvoice);
     setProcessingStep("Reading Invoice...");
     await wait(300);
-    setProcessingStep("Extracting Data...");
+    setProcessingStep("Extracting Information...");
     await wait(300);
+    setProcessingStep("Calculating Credits...");
+    await wait(250);
     const extracted = extractInvoiceData(file.name);
     Object.entries(extracted.values).forEach(([key, value]) => {
       if (value !== undefined && value !== "") form.setValue(key as keyof PaymentFormValues, value as never, { shouldValidate: true });
@@ -1715,6 +2062,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
         user_id: payment?.user_id ?? currentUser.id,
         payment_detail: null,
         payment_status: "Paid",
+        tax_amount: Number(values.tax_amount || 0),
+        total_amount: Number(values.total_amount || values.amount || 0),
         invoice_file: invoice,
         invoice_file_url: invoice.data_url,
         notes: values.notes || null
@@ -1748,8 +2097,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
             <FileUp className="h-8 w-8 text-[#E53935]" />
             <span className="font-semibold text-foreground">Drag & Drop</span>
             <span>or Choose File</span>
-            <span className="text-xs">Supported Files: PDF, PNG, JPG, JPEG</span>
-            <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg" onChange={(event) => handleInvoiceUpload(event.target.files?.[0])} />
+            <span className="text-xs">Supported Files: PDF, PNG, JPG, JPEG, WEBP</span>
+            <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handleInvoiceUpload(event.target.files?.[0])} />
           </label>
           {processingStep ? <p className="mt-3 text-sm font-medium text-[#E53935]">{processingStep}</p> : null}
           {confidence != null ? <p className="mt-3 text-xs text-muted-foreground">Extraction confidence: {confidence}%</p> : null}
@@ -1768,6 +2117,8 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
       <Field label="Order ID" error={form.formState.errors.order_id?.message}><Input {...form.register("order_id")} /></Field>
       <Field label="Amount Paid" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
       <Field label="Credits Purchased" error={form.formState.errors.credits?.message}><Input type="number" min="1" {...form.register("credits")} /></Field>
+      <Field label="Tax Amount" error={form.formState.errors.tax_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("tax_amount")} /></Field>
+      <Field label="Total Amount" error={form.formState.errors.total_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("total_amount")} /></Field>
       <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
       <Field label="AI Platform / Vendor Name" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
       <Field label="Payment Method">

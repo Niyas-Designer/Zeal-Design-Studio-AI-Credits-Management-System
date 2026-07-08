@@ -187,14 +187,14 @@ export const DEFAULT_AI_TOOLS: AiTool[] = [
     trending: true,
     rating: 4.7,
     popularity: 90,
-    alternatives: ["Midjourney", "Flux", "Freepik AI"]
+    alternatives: ["Midjourney", "Flux", "Magnific"]
   }),
   tool("leonardo", "Leonardo AI", "AI Image Generation", "Creative AI suite for concept art, product visuals, image editing, and production-ready assets.", "leonardo.ai", "https://leonardo.ai/pricing/", "https://docs.leonardo.ai/", {
     rating: 4.6,
     popularity: 89,
-    alternatives: ["Midjourney", "Freepik AI", "Ideogram"]
+    alternatives: ["Midjourney", "Magnific", "Ideogram"]
   }),
-  tool("freepik-ai", "Freepik AI", "AI Design", "Design asset platform with AI image generation, editing tools, templates, and stock creative resources.", "freepik.com", "https://www.freepik.com/pricing", "https://support.freepik.com/", {
+  tool("magnific", "Magnific", "AI Image Generation", "AI image upscaling and enhancement platform for detailed, high-resolution creative visuals.", "magnific.ai", "https://magnific.ai/pricing", "https://magnific.ai/", {
     recommended: true,
     rating: 4.6,
     popularity: 90,
@@ -251,13 +251,13 @@ export const DEFAULT_AI_TOOLS: AiTool[] = [
     recommended: true,
     rating: 4.8,
     popularity: 96,
-    alternatives: ["Figma AI", "Freepik AI", "Gamma"]
+    alternatives: ["Figma AI", "Magnific", "Gamma"]
   }),
   tool("figma-ai", "Figma AI", "AI Design", "AI-assisted product design workflows inside Figma for ideation, editing, search, and design systems.", "figma.com", "https://www.figma.com/pricing/", "https://help.figma.com/", {
     featured: true,
     rating: 4.7,
     popularity: 94,
-    alternatives: ["Canva AI", "Freepik AI", "Notion AI"]
+    alternatives: ["Canva AI", "Magnific", "Notion AI"]
   }),
   tool("notion-ai", "Notion AI", "AI Productivity", "AI writing, summarization, knowledge-base Q&A, and workflow assistance built into Notion.", "notion.so", "https://www.notion.com/pricing", "https://www.notion.com/help", {
     recommended: true,
@@ -299,7 +299,7 @@ export const DEFAULT_AI_TOOLS: AiTool[] = [
     pricing_type: "Freemium",
     rating: 4.7,
     popularity: 92,
-    alternatives: ["Midjourney", "Freepik AI", "Leonardo AI"]
+    alternatives: ["Midjourney", "Magnific", "Leonardo AI"]
   }),
   tool("luma-ai", "Luma AI", "AI Video Generation", "AI video and 3D generation platform for cinematic clips, camera motion, and creative storytelling.", "lumalabs.ai", "https://lumalabs.ai/pricing", "https://lumalabs.ai/learning-center", {
     trending: true,
