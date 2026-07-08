@@ -11,22 +11,19 @@ export const PLATFORMS = [
 ] as const;
 
 export const USAGE_CATEGORIES = [
-  "Men's",
-  "Womens",
-  "Romance",
-  "Dance",
-  "Kids",
-  "Infants",
-  "Fashion",
-  "Product",
-  "Lifestyle",
+  "Design Studio",
   "Ecommerce",
-  "Portrait",
-  "Outdoor",
-  "Studio",
-  "Wedding"
+  "Others"
 ] as const;
 
-export const SUPPLIERS = ["Renga", "Syed"] as const;
+export const SUPPLIERS = [
+  "Syad",
+  "Priyanga",
+  "Saravan",
+  "Naveen",
+  "Guru",
+  "Nagaraj",
+  "Krishnan"
+] as const;
 
 export const APP_NAME = "Zeal Design Studio";

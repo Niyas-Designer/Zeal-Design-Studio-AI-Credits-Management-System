@@ -48,10 +48,13 @@ export type PaymentMethod =
   | "UPI"
   | "Credit Card"
   | "Debit Card"
+  | "PayPal"
+  | "Bank Transfer"
   | "Net Banking"
-  | "Bank Transfer";
+  | "Other";
 
 export type PaymentStatus = "Pending" | "Paid" | "Failed" | "Refunded";
+export type InvoicePaymentStatus = "Paid" | "Unpaid" | "Partially Paid" | "Unknown";
 
 export type Payment = {
   id: string;
@@ -99,15 +102,25 @@ export type CreditPurchase = {
   id: string;
   user_id: string;
   platform: Platform;
+  invoice_name: string;
   purchase_date: string;
+  due_date: string | null;
   subscription_plan: string;
   invoice_number: string;
   currency: string;
+  subtotal: number;
+  tax_amount: number;
+  discount_amount: number;
   purchase_amount: number;
+  amount_paid: number;
+  balance_due: number;
+  payment_status: InvoicePaymentStatus;
   total_credits_purchased: number;
   expiry_date: string | null;
   payment_method: PaymentMethod;
   vendor: string;
+  customer_name: string | null;
+  billing_address: string | null;
   notes: string | null;
   invoice_file: InvoiceFile | null;
   extracted_json: Record<string, unknown> | null;

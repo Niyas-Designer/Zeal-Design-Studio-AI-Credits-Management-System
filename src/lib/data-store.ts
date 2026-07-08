@@ -15,6 +15,7 @@ import {
 } from "firebase/auth";
 import { auth } from "@/lib/firebase";
 import { AI_TOOL_CATEGORIES, AI_TOOL_LOGOS, DEFAULT_AI_TOOLS } from "@/lib/ai-tools";
+import { SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
 import type {
   AiUsage,
   AiUsageInput,
@@ -246,15 +247,17 @@ export async function setUserDisabled(_userId: string, _disabled: boolean) {
 }
 
 export async function getUsage(currentUser: Profile) {
-  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsagePlatform);
+  const rawRecords = readJson<AiUsage[]>(USAGE_KEY, []);
+  const records = rawRecords.map(normalizeUsageRecord);
+  if (JSON.stringify(rawRecords) !== JSON.stringify(records)) writeJson(USAGE_KEY, records);
   const visible = currentUser.role === "admin" ? records : records.filter((record) => record.user_id === currentUser.id);
   return visible
-    .map((record) => withProfile({ ...record, category: record.category || "Custom" }, currentUser))
+    .map((record) => withProfile(record, currentUser))
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
 export async function saveUsage(input: AiUsageInput, recordId?: string) {
-  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsagePlatform);
+  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsageRecord);
   const timestamp = now();
   const numberOfStyles = Number(input.number_of_styles) || 0;
   const calculatedImages = numberOfStyles * 6;
@@ -272,6 +275,8 @@ export async function saveUsage(input: AiUsageInput, recordId?: string) {
   }
   const calculatedInput = {
     ...input,
+    category: normalizeUsageCategory(input.category),
+    supplier_requirements: normalizeSupplier(input.supplier_requirements),
     buy_credits: purchasedCredits,
     number_of_images: calculatedImages,
     credits_used: calculatedCreditsUsed
@@ -454,12 +459,32 @@ function normalizePlatformLabel(value: string) {
   return value.toLowerCase() === legacyPlatformKey() ? "Magnific" : value;
 }
 
-function normalizeUsagePlatform(record: AiUsage): AiUsage {
-  return { ...record, platform: normalizePlatformLabel(record.platform) as AiUsage["platform"] };
+function normalizeUsageCategory(value: string | null | undefined) {
+  return USAGE_CATEGORIES.includes(value as (typeof USAGE_CATEGORIES)[number])
+    ? value as (typeof USAGE_CATEGORIES)[number]
+    : "Design Studio";
+}
+
+function normalizeSupplier(value: string | null | undefined) {
+  return SUPPLIERS.includes(value as (typeof SUPPLIERS)[number])
+    ? value as (typeof SUPPLIERS)[number]
+    : "Syad";
+}
+
+function normalizeUsageRecord(record: AiUsage): AiUsage {
+  return {
+    ...record,
+    platform: normalizePlatformLabel(record.platform) as AiUsage["platform"],
+    category: normalizeUsageCategory(record.category),
+    supplier_requirements: normalizeSupplier(record.supplier_requirements)
+  };
 }
 
 function normalizePurchasePlatform(purchase: CreditPurchase): CreditPurchase {
-  return { ...purchase, platform: normalizePlatformLabel(purchase.platform) as CreditPurchase["platform"] };
+  return {
+    ...purchase,
+    platform: normalizePlatformLabel(purchase.platform) as CreditPurchase["platform"],
+  };
 }
 
 function normalizeAiToolName(tool: AiTool): AiTool {
@@ -509,6 +534,16 @@ export async function getPurchases(currentUser?: Profile) {
       withProfile(
         {
           ...purchase,
+          invoice_name: purchase.invoice_name ?? purchase.invoice_number ?? "Imported invoice",
+          due_date: purchase.due_date ?? null,
+          subtotal: Number(purchase.subtotal || 0),
+          tax_amount: Number(purchase.tax_amount || 0),
+          discount_amount: Number(purchase.discount_amount || 0),
+          amount_paid: Number(purchase.amount_paid || purchase.purchase_amount || 0),
+          balance_due: Number(purchase.balance_due || 0),
+          payment_status: purchase.payment_status ?? "Unknown",
+          customer_name: purchase.customer_name ?? null,
+          billing_address: purchase.billing_address ?? null,
           extracted_json: purchase.extracted_json ?? null,
           ocr_text: purchase.ocr_text ?? null
         },
@@ -518,11 +553,11 @@ export async function getPurchases(currentUser?: Profile) {
     .sort((a, b) => b.purchase_date.localeCompare(a.purchase_date));
 }
 
-export async function savePurchase(input: CreditPurchaseInput, purchaseId?: string) {
+export async function savePurchase(input: CreditPurchaseInput, purchaseId?: string, options?: { allowDuplicateInvoice?: boolean }) {
   const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
   const timestamp = now();
   const duplicate = purchases.find((purchase) => purchase.id !== purchaseId && purchase.invoice_number.toLowerCase() === input.invoice_number.toLowerCase());
-  if (duplicate) throw new Error("Duplicate invoice uploaded. Please use a unique invoice number.");
+  if (duplicate && !options?.allowDuplicateInvoice) throw new Error("Duplicate invoice uploaded. Please use a unique invoice number.");
 
   if (purchaseId) {
     writeJson(
@@ -558,12 +593,13 @@ export async function deletePurchase(purchaseId: string) {
 }
 
 export async function getUsageCategories() {
-  return readJson<string[]>(USAGE_CATEGORIES_KEY, []);
+  writeJson(USAGE_CATEGORIES_KEY, [...USAGE_CATEGORIES]);
+  return [...USAGE_CATEGORIES];
 }
 
 export async function saveUsageCategory(category: string) {
   const value = category.trim();
-  if (!value) return;
+  if (!USAGE_CATEGORIES.includes(value as (typeof USAGE_CATEGORIES)[number])) return;
   const categories = readJson<string[]>(USAGE_CATEGORIES_KEY, []);
   if (!categories.some((item) => item.toLowerCase() === value.toLowerCase())) {
     writeJson(USAGE_CATEGORIES_KEY, [...categories, value].sort((a, b) => a.localeCompare(b)));

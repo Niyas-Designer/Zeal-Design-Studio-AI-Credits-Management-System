@@ -44,8 +44,8 @@ export function getDashboardStats(records: AiUsage[], purchases: CreditPurchase[
     monthlyUsage: monthly.creditsUsed,
     currentMonthBalance: monthly.buyCredits - monthly.creditsUsed,
     monthlyPurchase: monthly.buyCredits,
-    invoicesUploaded: purchases.filter((purchase) => purchase.invoice_file).length,
-    latestInvoice: purchases.find((purchase) => purchase.invoice_file)?.invoice_number ?? ""
+    totalPurchases: purchases.length,
+    latestInvoice: purchases[0]?.invoice_number ?? ""
   };
 }
 
@@ -124,7 +124,7 @@ export function getPurchaseSeries(purchases: CreditPurchase[]) {
     const current = map.get(key) ?? { month: label, creditsPurchased: 0, invoices: 0, amount: 0 };
     current.creditsPurchased += toNumber(purchase.total_credits_purchased);
     current.amount += toNumber(purchase.purchase_amount);
-    current.invoices += purchase.invoice_file ? 1 : 0;
+    current.invoices += 1;
     map.set(key, current);
   });
   return Array.from(map.entries()).sort(([a], [b]) => a.localeCompare(b)).map(([, value]) => value);

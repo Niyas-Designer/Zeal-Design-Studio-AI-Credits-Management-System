@@ -32,6 +32,11 @@ import {
 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
+import tesseractWorkerUrl from "tesseract.js/dist/worker.min.js?url";
+import tesseractCoreUrl from "tesseract.js-core/tesseract-core-simd-lstm.wasm.js?url";
+import { createWorker } from "tesseract.js";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -54,14 +59,12 @@ import {
   getPayments,
   getPurchases,
   getUsage,
-  getUsageCategories,
   getUserCredits,
   getUsers,
   onAuthChange,
   savePayment,
   savePurchase,
   saveUsage,
-  saveUsageCategory,
   setUserDisabled,
   simulatePasswordReset,
   signIn,
@@ -87,6 +90,13 @@ import { cn, formatDate, formatNumber } from "@/lib/utils";
 import type { z } from "zod";
 
 type View = "dashboard" | "studio" | "usage" | "purchases" | "reports" | "payments" | "users";
+type PurchaseDuplicateState = {
+  kind: "same" | "different";
+  existing: CreditPurchase;
+  input: Parameters<typeof savePurchase>[0];
+} | null;
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const FULL_LOGO = "/logo-full.png";
 const MARK_LOGO = "/favicon.png";
@@ -96,6 +106,8 @@ const CREDITS_PER_IMAGE = 150;
 const DEFAULT_PLATFORM_CREDIT_PACKS: Partial<Record<Platform, number>> = {
   Magnific: 45000
 };
+const PAYMENT_METHODS: PaymentMethod[] = ["UPI", "Credit Card", "Debit Card", "PayPal", "Bank Transfer", "Net Banking", "Other"];
+const TESSERACT_LANG_PATH = "/tessdata";
 
 const FASHION_SLIDES = [
   {
@@ -881,7 +893,6 @@ function PurchaseCreditsPage({ profile }: { profile: Profile }) {
   const [usage, setUsage] = useState<AiUsage[]>([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<CreditPurchase | null>(null);
-  const [invoicePreview, setInvoicePreview] = useState<CreditPurchase | null>(null);
   const [search, setSearch] = useState("");
   const { toast } = useToast();
 
@@ -927,7 +938,7 @@ function PurchaseCreditsPage({ profile }: { profile: Profile }) {
       </Card>
       <PurchaseAlerts purchases={purchases} usage={usage} />
       <DataTable
-        headers={["Date", "Platform", "Invoice", "Credits Purchased", "Used", "Remaining", "Status", "Invoice", ""]}
+        headers={["Date", "Platform", "Invoice Number", "Credits Purchased", "Used", "Remaining", "Status", "Actions"]}
         empty="No credit purchases yet."
         rows={filtered.map((purchase) => {
           const used = purchaseUsage.get(purchase.id) ?? 0;
@@ -941,10 +952,7 @@ function PurchaseCreditsPage({ profile }: { profile: Profile }) {
             formatNumber(used),
             formatNumber(Math.max(remaining, 0)),
             status,
-            purchase.invoice_file ? (
-              <Button key={`${purchase.id}-invoice`} size="sm" variant="outline" onClick={() => setInvoicePreview(purchase)}>Preview</Button>
-            ) : "Missing",
-            <div className="flex gap-2" key={purchase.id}>
+            <div className="flex justify-end gap-2" key={purchase.id}>
               <Button variant="outline" size="sm" onClick={() => { setEditing(purchase); setOpen(true); }}>Edit</Button>
               <Button variant="destructive" size="sm" onClick={() => remove(purchase)}>Delete</Button>
             </div>
@@ -952,12 +960,11 @@ function PurchaseCreditsPage({ profile }: { profile: Profile }) {
         })}
       />
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[92vh] overflow-y-auto sm:max-w-3xl">
+        <DialogContent className={cn("max-h-[92vh] overflow-y-auto", editing ? "sm:max-w-2xl" : "sm:max-w-3xl")}>
           <DialogHeader><DialogTitle>{editing ? "Edit Purchase" : "New Credit Purchase"}</DialogTitle></DialogHeader>
           <PurchaseForm currentUser={profile} purchase={editing} onDone={() => { setOpen(false); refresh(); }} />
         </DialogContent>
       </Dialog>
-      <InvoiceViewer purchase={invoicePreview} onOpenChange={(open) => !open && setInvoicePreview(null)} onReplaced={refresh} />
     </>
   );
 }
@@ -994,7 +1001,6 @@ function PurchaseAlerts({ purchases, usage }: { purchases: CreditPurchase[]; usa
     const remaining = purchase.total_credits_purchased - used;
     const ratio = purchase.total_credits_purchased ? remaining / purchase.total_credits_purchased : 0;
     const items: string[] = [];
-    if (!purchase.invoice_file) items.push(`${purchase.platform} ${purchase.invoice_number}: invoice missing.`);
     if (remaining <= 0) items.push(`${purchase.platform} ${purchase.invoice_number}: credits exhausted.`);
     else if (ratio < 0.2) items.push(`${purchase.platform} ${purchase.invoice_number}: credits below 20%.`);
     if (purchase.expiry_date) {
@@ -1021,34 +1027,58 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
   const [ocrText, setOcrText] = useState(purchase?.ocr_text ?? "");
   const [extractionStep, setExtractionStep] = useState("");
   const [extractionConfidence, setExtractionConfidence] = useState<number | null>(null);
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const [forceEditableFields, setForceEditableFields] = useState<string[]>([]);
+  const [duplicateState, setDuplicateState] = useState<PurchaseDuplicateState>(null);
   const [isDraggingInvoice, setIsDraggingInvoice] = useState(false);
+  const extractedLocked = Boolean(invoice && extractedJson);
   const form = useForm<PurchaseFormValues>({
     resolver: zodResolver(purchaseSchema),
     defaultValues: purchase
       ? {
           platform: purchase.platform,
+          invoice_name: purchase.invoice_name,
           purchase_date: purchase.purchase_date,
+          due_date: purchase.due_date ?? "",
           subscription_plan: purchase.subscription_plan,
           invoice_number: purchase.invoice_number,
           currency: purchase.currency,
+          subtotal: purchase.subtotal ?? 0,
+          tax_amount: purchase.tax_amount ?? 0,
+          discount_amount: purchase.discount_amount ?? 0,
           purchase_amount: purchase.purchase_amount,
+          amount_paid: purchase.amount_paid ?? purchase.purchase_amount,
+          balance_due: purchase.balance_due ?? 0,
+          payment_status: purchase.payment_status ?? "Unknown",
           total_credits_purchased: purchase.total_credits_purchased,
           expiry_date: purchase.expiry_date ?? "",
           payment_method: purchase.payment_method,
           vendor: purchase.vendor,
+          customer_name: purchase.customer_name ?? "",
+          billing_address: purchase.billing_address ?? "",
           notes: purchase.notes ?? ""
         }
       : {
           platform: "Magnific",
+          invoice_name: "",
           purchase_date: new Date().toISOString().slice(0, 10),
+          due_date: "",
           subscription_plan: "",
           invoice_number: "",
           currency: "INR",
+          subtotal: 0,
+          tax_amount: 0,
+          discount_amount: 0,
           purchase_amount: 0,
-          total_credits_purchased: 45000,
+          amount_paid: 0,
+          balance_due: 0,
+          payment_status: "Unknown",
+          total_credits_purchased: 0,
           expiry_date: "",
           payment_method: "UPI",
           vendor: "",
+          customer_name: "",
+          billing_address: "",
           notes: ""
         }
   });
@@ -1061,18 +1091,16 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
     }
 
     setExtractionStep("Uploading...");
-    const [data_url, rawText] = await Promise.all([fileToDataUrl(file), readInvoiceText(file)]);
+    const data_url = await fileToDataUrl(file);
     const nextInvoice: InvoiceFile = { name: file.name, type: file.type, size: file.size, data_url, uploaded_at: new Date().toISOString() };
     setInvoice(nextInvoice);
 
     setExtractionStep("Reading PDF...");
-    await wait(250);
-    setExtractionStep(file.type === "application/pdf" ? "Running OCR..." : "Running OCR...");
-    await wait(250);
+    const extraction = await extractTextFromInvoiceFile(file, (message) => setExtractionStep(message));
     setExtractionStep("Extracting Invoice Details...");
     await wait(250);
 
-    const extracted = extractCreditPurchaseInvoice(file.name, rawText);
+    const extracted = extractCreditPurchaseInvoice(file.name, extraction.text, extraction.method, extraction.ocrConfidence);
     Object.entries(extracted.values).forEach(([key, value]) => {
       if (value !== undefined && value !== "") {
         form.setValue(key as keyof PurchaseFormValues, value as never, { shouldValidate: true, shouldDirty: true });
@@ -1082,6 +1110,7 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
     setExtractedJson(extracted.extractedJson);
     setOcrText(extracted.ocrText);
     setExtractionConfidence(extracted.confidence);
+    setMissingFields(extracted.missingFields);
     setExtractionStep("Populating Form...");
     await wait(250);
     setExtractionStep("Done");
@@ -1090,7 +1119,7 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
 
     toast({
       title: "Invoice extracted",
-      description: extracted.confidence < 70 ? "Some fields could not be detected. Please verify before saving." : "Form populated from invoice details."
+      description: extracted.missingFields.length ? `Missing: ${extracted.missingFields.slice(0, 4).join(", ")}` : "Form populated from invoice details."
     });
   }
 
@@ -1100,26 +1129,96 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
     handlePurchaseInvoiceUpload(event.dataTransfer.files?.[0]);
   }
 
-  async function onSubmit(values: PurchaseFormValues) {
+  function buildPurchaseInput(values: PurchaseFormValues) {
+    return {
+      ...values,
+      user_id: purchase?.user_id ?? currentUser.id,
+      invoice_name: values.invoice_name || invoice?.name || "Imported invoice",
+      due_date: values.due_date || null,
+      subscription_plan: values.subscription_plan || "Imported invoice",
+      invoice_number: values.invoice_number || `IMP-${Date.now()}`,
+      currency: values.currency || "INR",
+      subtotal: Number(values.subtotal || 0),
+      tax_amount: Number(values.tax_amount || 0),
+      discount_amount: Number(values.discount_amount || 0),
+      purchase_amount: Number(values.purchase_amount || 0),
+      amount_paid: Number(values.purchase_amount || values.amount_paid || 0),
+      balance_due: Number(values.balance_due || 0),
+      payment_status: values.payment_status || "Unknown",
+      expiry_date: values.expiry_date || null,
+      notes: values.notes || null,
+      vendor: values.vendor || values.platform || "Not detected",
+      customer_name: values.customer_name || currentUser.full_name || null,
+      billing_address: values.billing_address || null,
+      invoice_file: invoice,
+      extracted_json: extractedJson,
+      ocr_text: ocrText || null
+    };
+  }
+
+  function validateRequiredPurchase(values: PurchaseFormValues) {
+    const missing: string[] = [];
+    if (!values.platform) missing.push("Platform Name");
+    if (!values.purchase_date) missing.push("Purchase Date");
+    if (!values.payment_method) missing.push("Payment Method");
+    if (!Number(values.purchase_amount || 0)) missing.push("Amount Paid");
+    if (!Number(values.total_credits_purchased || 0)) missing.push("Credits");
+    if (missing.length) {
+      setMissingFields((current) => Array.from(new Set([...current, ...missing])));
+      toast({ title: "Required fields missing", description: `Please fill: ${missing.join(", ")}`, variant: "destructive" });
+      return false;
+    }
+    return true;
+  }
+
+  async function findDuplicateInvoice(values: PurchaseFormValues) {
+    const invoiceNumber = values.invoice_number?.trim();
+    if (!invoiceNumber) return null;
+    const purchases = await getPurchases(currentUser);
+    return purchases.find((item) => item.id !== purchase?.id && item.invoice_number.trim().toLowerCase() === invoiceNumber.toLowerCase()) ?? null;
+  }
+
+  function isSameInvoice(existing: CreditPurchase, values: PurchaseFormValues) {
+    return (
+      existing.vendor.trim().toLowerCase() === String(values.vendor || "").trim().toLowerCase() &&
+      existing.purchase_date === values.purchase_date &&
+      Number(existing.purchase_amount || 0) === Number(values.purchase_amount || 0)
+    );
+  }
+
+  async function savePurchaseInput(input: Parameters<typeof savePurchase>[0], purchaseId?: string, allowDuplicateInvoice = false) {
     try {
-      await savePurchase({
-        ...values,
-        user_id: purchase?.user_id ?? currentUser.id,
-        expiry_date: values.expiry_date || null,
-        notes: values.notes || null,
-        invoice_file: invoice,
-        extracted_json: extractedJson,
-        ocr_text: ocrText || null
-      }, purchase?.id);
-      toast({ title: purchase ? "Purchase updated" : "Purchase saved", description: invoice ? "Invoice linked to credit balance." : "Invoice missing. Add it when available." });
+      await savePurchase(input, purchaseId, { allowDuplicateInvoice });
+      toast({ title: purchaseId ? "Purchase updated" : "Purchase saved", description: "Purchase credits saved successfully." });
       onDone();
     } catch (error) {
       toast({ title: "Purchase save failed", description: getError(error), variant: "destructive" });
     }
   }
 
+  async function onSubmit(values: PurchaseFormValues) {
+    if (!validateRequiredPurchase(values)) return;
+    const input = buildPurchaseInput(values);
+    const duplicate = await findDuplicateInvoice(values);
+    if (duplicate) {
+      setDuplicateState({ kind: isSameInvoice(duplicate, values) ? "same" : "different", existing: duplicate, input });
+      return;
+    }
+    await savePurchaseInput(input, purchase?.id);
+  }
+
+  function canEdit(label: string) {
+    return Boolean(purchase) || label === "Credits" || label === "Notes" || label === "Invoice Number" || !extractedLocked || missingFields.includes(label) || forceEditableFields.includes(label);
+  }
+
+  function missingInputClass(label: string) {
+    return missingFields.includes(label) ? "border-[#E53935] focus-visible:ring-[#E53935]/30" : undefined;
+  }
+
   return (
+    <>
     <form className="grid gap-4 sm:grid-cols-2" onSubmit={form.handleSubmit(onSubmit)}>
+      {!purchase ? (
       <div className="sm:col-span-2">
         <Label>Upload Invoice</Label>
         <div className="mt-2 rounded-md border border-dashed p-5">
@@ -1148,6 +1247,9 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
               OCR Confidence: {extractionConfidence}%{extractionConfidence < 70 ? " - Some fields could not be detected. Please verify before saving." : ""}
             </p>
           ) : null}
+          {missingFields.length ? (
+            <p className="mt-2 text-xs text-muted-foreground">Could not detect: {missingFields.join(", ")}</p>
+          ) : null}
           {invoice ? (
             <div className="mt-4 space-y-4">
               <div className="flex flex-col gap-3 rounded-md border bg-background p-4 sm:flex-row sm:items-center sm:justify-between">
@@ -1161,7 +1263,7 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
                     Replace
                     <input className="hidden" type="file" accept=".pdf,image/png,image/jpeg,image/webp" onChange={(event) => handlePurchaseInvoiceUpload(event.target.files?.[0])} />
                   </label>
-                  <Button type="button" variant="destructive" onClick={() => { setInvoice(null); setExtractedJson(null); setOcrText(""); setExtractionConfidence(null); }}>Delete</Button>
+                  <Button type="button" variant="destructive" onClick={() => { setInvoice(null); setExtractedJson(null); setOcrText(""); setExtractionConfidence(null); setMissingFields([]); }}>Delete</Button>
                 </div>
               </div>
               <InvoicePreview invoice={invoice} />
@@ -1169,32 +1271,56 @@ function PurchaseForm({ currentUser, purchase, onDone }: { currentUser: Profile;
           ) : null}
         </div>
       </div>
-      <Field label="AI Platform" error={form.formState.errors.platform?.message}>
-        <Select value={form.watch("platform")} onValueChange={(value) => form.setValue("platform", value as Platform, { shouldValidate: true })}>
+      ) : null}
+      <Field label="Platform Name" error={form.formState.errors.platform?.message}>
+        <Select disabled={!canEdit("Platform Name")} value={form.watch("platform")} onValueChange={(value) => form.setValue("platform", value as Platform, { shouldValidate: true })}>
           <SelectTrigger><SelectValue /></SelectTrigger>
           <SelectContent>{PLATFORMS.map((platform) => <SelectItem key={platform} value={platform}>{platform}</SelectItem>)}</SelectContent>
         </Select>
       </Field>
-      <Field label="Purchase Date" error={form.formState.errors.purchase_date?.message}><Input type="date" {...form.register("purchase_date")} /></Field>
-      <Field label="Subscription Plan" error={form.formState.errors.subscription_plan?.message}><Input {...form.register("subscription_plan")} /></Field>
-      <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input {...form.register("invoice_number")} /></Field>
-      <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
-      <Field label="Purchase Amount" error={form.formState.errors.purchase_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("purchase_amount")} /></Field>
-      <Field label="Total Credits Purchased" error={form.formState.errors.total_credits_purchased?.message}><Input type="number" min="1" {...form.register("total_credits_purchased")} /></Field>
-      <Field label="Expiry Date (Optional)"><Input type="date" {...form.register("expiry_date")} /></Field>
+      <Field label="Purchase Date" error={form.formState.errors.purchase_date?.message}><Input disabled={!canEdit("Purchase Date")} className={missingInputClass("Purchase Date")} type="date" {...form.register("purchase_date")} /></Field>
+      <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input disabled={!canEdit("Invoice Number")} className={missingInputClass("Invoice Number")} placeholder="INV-C-2026-16226061" {...form.register("invoice_number")} /></Field>
       <Field label="Payment Method">
-        <Select value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod, { shouldValidate: true })}>
+        <Select disabled={!canEdit("Payment Method")} value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod, { shouldValidate: true })}>
           <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>{["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+          <SelectContent>{PAYMENT_METHODS.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
         </Select>
       </Field>
-      <Field label="Vendor" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
-      <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
+      <Field label="Amount Paid" error={form.formState.errors.purchase_amount?.message}><Input disabled={!canEdit("Amount Paid")} className={missingInputClass("Amount Paid")} type="number" min="0" step="0.01" {...form.register("purchase_amount")} /></Field>
+      <Field label="Credits" error={form.formState.errors.total_credits_purchased?.message}><Input type="number" min="1" {...form.register("total_credits_purchased")} /></Field>
+      <Field label="Notes" className="sm:col-span-2"><Textarea className={missingInputClass("Notes")} {...form.register("notes")} /></Field>
       <div className="flex justify-end gap-2 sm:col-span-2">
         <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
         <Button disabled={form.formState.isSubmitting}>Save</Button>
       </div>
     </form>
+    <Dialog open={!!duplicateState} onOpenChange={(open) => !open && setDuplicateState(null)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{duplicateState?.kind === "same" ? "This invoice already exists." : "Invoice number already exists but the invoice details are different."}</DialogTitle>
+        </DialogHeader>
+        {duplicateState ? (
+          <div className="space-y-4">
+            <div className="rounded-md border bg-muted/35 p-4 text-sm text-muted-foreground">
+              <p><span className="font-semibold text-foreground">Existing:</span> {duplicateState.existing.vendor} · {duplicateState.existing.purchase_date} · {duplicateState.existing.currency} {formatNumber(duplicateState.existing.purchase_amount)}</p>
+              <p><span className="font-semibold text-foreground">Uploaded:</span> {duplicateState.input.vendor} · {duplicateState.input.purchase_date} · {duplicateState.input.currency} {formatNumber(duplicateState.input.purchase_amount)}</p>
+            </div>
+            {duplicateState.kind === "same" ? (
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setDuplicateState(null)}>Cancel</Button>
+                <Button type="button" onClick={() => savePurchaseInput(duplicateState.input, duplicateState.existing.id)}>Update Existing Invoice</Button>
+              </div>
+            ) : (
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => savePurchaseInput(duplicateState.input, undefined, true)}>Create as New Invoice</Button>
+                <Button type="button" onClick={() => savePurchaseInput(duplicateState.input, duplicateState.existing.id)}>Replace Existing Record</Button>
+              </div>
+            )}
+          </div>
+        ) : null}
+      </DialogContent>
+    </Dialog>
+    </>
   );
 }
 
@@ -1318,25 +1444,97 @@ function downloadInvoice(invoice: InvoiceFile) {
   anchor.click();
 }
 
-function readInvoiceText(file: File) {
-  return new Promise<string>((resolve) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const buffer = reader.result as ArrayBuffer;
-        const decoded = new TextDecoder("latin1").decode(buffer);
-        const readable = decoded
-          .replace(/[^\x09\x0A\x0D\x20-\x7E]+/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
-        resolve(readable);
-      } catch {
-        resolve("");
+async function extractTextFromInvoiceFile(file: File, onStep: (message: string) => void) {
+  if (file.type === "application/pdf") {
+    return extractPdfInvoiceText(file, onStep);
+  }
+  onStep("Running OCR...");
+  return {
+    text: await recognizeImageText(file, onStep),
+    method: "ocr" as const,
+    ocrConfidence: 80
+  };
+}
+
+async function extractPdfInvoiceText(file: File, onStep: (message: string) => void) {
+  const data = await file.arrayBuffer();
+  const document = await pdfjsLib.getDocument({ data }).promise;
+  const pageTexts: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    onStep(`Reading PDF page ${pageNumber} of ${document.numPages}...`);
+    const page = await document.getPage(pageNumber);
+    const textContent = await page.getTextContent();
+    const text = textContent.items
+      .map((item) => ("str" in item ? item.str : ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text) pageTexts.push(text);
+  }
+
+  const digitalText = pageTexts.join("\n").trim();
+  if (digitalText.length > 80) {
+    return { text: digitalText, method: "pdf-text" as const, ocrConfidence: 100 };
+  }
+
+  onStep("Running OCR...");
+  const ocrTexts: string[] = [];
+  const confidences: number[] = [];
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    onStep(`Running OCR page ${pageNumber} of ${document.numPages}...`);
+    const page = await document.getPage(pageNumber);
+    const canvas = await documentPageToCanvas(page);
+    const result = await recognizeCanvasText(canvas, onStep);
+    ocrTexts.push(result.text);
+    if (result.confidence) confidences.push(result.confidence);
+  }
+
+  return {
+    text: ocrTexts.join("\n").trim(),
+    method: "ocr" as const,
+    ocrConfidence: confidences.length ? Math.round(confidences.reduce((sum, value) => sum + value, 0) / confidences.length) : 0
+  };
+}
+
+async function documentPageToCanvas(page: pdfjsLib.PDFPageProxy) {
+  const viewport = page.getViewport({ scale: 2 });
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("Unable to create canvas context for OCR.");
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  await page.render({ canvas, canvasContext: context, viewport }).promise;
+  return canvas;
+}
+
+async function recognizeImageText(file: File, onStep: (message: string) => void) {
+  const result = await recognizeCanvasText(file, onStep);
+  return result.text;
+}
+
+async function recognizeCanvasText(image: HTMLCanvasElement | File, onStep: (message: string) => void) {
+  const worker = await createWorker("eng", undefined, {
+    workerPath: tesseractWorkerUrl,
+    corePath: tesseractCoreUrl,
+    langPath: TESSERACT_LANG_PATH,
+    gzip: true,
+    logger: (message) => {
+      if (message.status) {
+        const progress = Math.round((message.progress || 0) * 100);
+        onStep(progress ? `Running OCR... ${progress}%` : "Running OCR...");
       }
-    };
-    reader.onerror = () => resolve("");
-    reader.readAsArrayBuffer(file);
+    }
   });
+  try {
+    const result = await worker.recognize(image);
+    return {
+      text: result.data.text.replace(/\s+/g, " ").trim(),
+      confidence: Math.round(result.data.confidence || 0)
+    };
+  } finally {
+    await worker.terminate();
+  }
 }
 
 function generateInvoiceNumber() {
@@ -1347,27 +1545,51 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function extractCreditPurchaseInvoice(filename: string, rawText: string) {
+function extractCreditPurchaseInvoice(filename: string, rawText: string, method: "pdf-text" | "ocr", ocrConfidence: number) {
   const source = `${filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ")} ${rawText}`.replace(/\s+/g, " ").trim();
   const platform = detectPlatform(source);
   const vendor = detectVendor(source) || platform;
+  const invoiceName = pickMatch(source, [
+    /(?:invoice name|description|item|product|service)[:\s-]*([a-z0-9 &+./-]{3,60})/i,
+    /\b([a-z0-9 &+.-]{3,40}\s+(?:invoice|subscription|plan))\b/i
+  ]) || `${vendor} Invoice`;
   const invoiceNumber = pickMatch(source, [
-    /\b(?:invoice|inv|receipt)\s*(?:number|no|#)?[:\s-]*([a-z0-9][a-z0-9./-]{3,})/i,
-    /\b((?:INV|FP|OPENAI|ANT|MID|RUN|CUR|GEM)[-/]?\d{3,}[-/]?\d*)\b/i
+    /\b(?:invoice|inv|receipt)\s*(?:number|no|#|id)?[:\s-]*([a-z0-9][a-z0-9./-]{3,})/i,
+    /\b(?:invoice|inv|receipt)[\s#:.-]+([a-z]{1,8}[-/]?\d[a-z0-9./-]{2,})\b/i,
+    /\b((?:INV|FP|OPENAI|ANT|MID|RUN|CUR|GEM|MAG|STB|REP)[-/]?\d{3,}[-/]?\d*)\b/i
   ]);
-  const credits = pickNumber(source, [
-    /(?:credits?|tokens?)\s*(?:purchased|added|total)?[:\s-]*([\d,]+)/i,
-    /([\d,]+)\s*(?:credits?|tokens?)\b/i
-  ]);
-  const amount = pickNumber(source, [
-    /(?:amount paid|paid|total due|total amount|grand total|amount)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+  const credits = 0;
+  const totalAmount = pickNumber(source, [
+    /(?:amount paid|paid|total due|total amount|grand total|invoice total|total|amount)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed|eur|€)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+    /(?:₹|rs\.?|inr|usd|\$|aed|eur|€)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:total|paid|due)?/i,
     /(?:₹|rs\.?|inr|usd|\$|aed)\s*([\d,]+(?:\.\d{1,2})?)/i
+  ]);
+  const subtotal = pickNumber(source, [
+    /(?:subtotal|sub total|net amount|before tax|taxable amount)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed|eur|€)?\s*([\d,]+(?:\.\d{1,2})?)/i
+  ]);
+  const tax = pickNumber(source, [
+    /(?:tax|gst|vat|cgst|sgst|igst|sales tax|tax amount)[:\s@%()-]*(?:₹|rs\.?|inr|usd|\$|aed|eur|€)?\s*([\d,]+(?:\.\d{1,2})?)/i,
+    /(?:₹|rs\.?|inr|usd|\$|aed|eur|€)\s*([\d,]+(?:\.\d{1,2})?)\s*(?:tax|gst|vat|cgst|sgst|igst)/i,
+    /(?:tax|gst|vat|cgst|sgst|igst)[^\d]{0,24}([\d,]+(?:\.\d{1,2})?)/i
+  ]);
+  const discount = pickNumber(source, [
+    /(?:discount|coupon|credit applied)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed)?\s*([\d,]+(?:\.\d{1,2})?)/i
+  ]);
+  const amountPaid = pickNumber(source, [
+    /(?:amount paid|paid|payment received|charged|card charged)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed|eur|€)?\s*([\d,]+(?:\.\d{1,2})?)/i
+  ]) || totalAmount;
+  const balanceDue = pickNumber(source, [
+    /(?:balance due|amount due|due amount|outstanding)[:\s-]*(?:₹|rs\.?|inr|usd|\$|aed)?\s*([\d,]+(?:\.\d{1,2})?)/i
   ]);
   const currency = detectCurrency(source);
   const purchaseDate = normalizeInvoiceDate(
     pickMatch(source, [
       /(?:invoice date|payment date|purchase date|date)[:\s-]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i,
       /(?:invoice date|payment date|purchase date|date)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i,
+      /(?:invoice date|payment date|purchase date|date)[:\s-]*(\d{1,2}\s+[a-z]{3,9},?\s+20\d{2})/i,
+      /(?:issued|created|billed on|receipt date)[:\s-]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i,
+      /(?:issued|created|billed on|receipt date)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i,
+      /(?:issued|created|billed on|receipt date)[:\s-]*(\d{1,2}\s+[a-z]{3,9},?\s+20\d{2})/i,
       /\b(20\d{2}[./-]\d{1,2}[./-]\d{1,2})\b/
     ])
   );
@@ -1377,49 +1599,103 @@ function extractCreditPurchaseInvoice(filename: string, rawText: string) {
       /(?:expiry|expires|valid until|renews on)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i
     ])
   );
+  const dueDate = normalizeInvoiceDate(
+    pickMatch(source, [
+      /(?:due date|payment due)[:\s-]*(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})/i,
+      /(?:due date|payment due)[:\s-]*([a-z]{3,9}\s+\d{1,2},?\s+20\d{2})/i,
+      /(?:due date|payment due)[:\s-]*(\d{1,2}\s+[a-z]{3,9},?\s+20\d{2})/i
+    ])
+  );
   const plan = pickMatch(source, [
     /(?:subscription plan|plan name|plan)[:\s-]*([a-z0-9 &+./-]{3,40})/i,
     /\b(premium monthly|premium yearly|pro monthly|pro yearly|standard monthly|business monthly|enterprise)\b/i
   ]);
   const paymentMethod = detectPaymentMethod(source);
+  const paymentStatus = detectPaymentStatus(source, balanceDue, amountPaid, totalAmount);
+  const customerName = pickMatch(source, [
+    /(?:customer name|customer|bill to|billed to|client|name)[:\s-]*([a-z][a-z .'-]{2,60})/i,
+    /(?:billing details|billing information)[:\s-]*([a-z][a-z .'-]{2,60})/i
+  ]);
+  const billingAddress = pickMatch(source, [
+    /(?:billing address|bill to address|billing details|billing information|address)[:\s-]*([a-z0-9, .#/\-]{8,180}?)(?:\s+(?:invoice|payment|subtotal|total|tax|gst|vat|email|phone)\b|$)/i,
+    /(?:bill to|billed to)[:\s-]*[a-z .'-]{2,60}\s+([a-z0-9, .#/\-]{8,160}?)(?:\s+(?:invoice|payment|subtotal|total|tax|gst|vat|email|phone)\b|$)/i
+  ]);
   const extractedValues: Partial<PurchaseFormValues> = {
     platform,
+    invoice_name: invoiceName,
     subscription_plan: cleanExtractedText(plan) || `${platform} Subscription`,
     purchase_date: purchaseDate || new Date().toISOString().slice(0, 10),
+    due_date: dueDate || "",
     invoice_number: invoiceNumber ? invoiceNumber.toUpperCase() : generateInvoiceNumber(),
     currency,
-    purchase_amount: amount,
-    total_credits_purchased: credits || (platform === "Magnific" ? 45000 : 0),
+    subtotal: subtotal || Math.max(totalAmount - tax + discount, 0),
+    tax_amount: tax,
+    discount_amount: discount,
+    purchase_amount: totalAmount,
+    amount_paid: amountPaid,
+    balance_due: balanceDue,
+    payment_status: paymentStatus,
+    total_credits_purchased: undefined,
     expiry_date: expiryDate || "",
     vendor: vendor || platform,
-    payment_method: paymentMethod
+    payment_method: paymentMethod,
+    customer_name: customerName,
+    billing_address: billingAddress
   };
   const confidenceFields = [
     platform,
     plan,
     purchaseDate,
+    dueDate,
     invoiceNumber,
     currency,
-    amount,
-    credits,
+    totalAmount,
+    tax,
+    amountPaid,
+    paymentStatus !== "Unknown",
     vendor,
-    paymentMethod
+    paymentMethod,
+    customerName,
+    billingAddress
   ].filter(Boolean).length;
-  const confidence = Math.min(98, Math.max(45, Math.round((confidenceFields / 9) * 100)));
-  const notes = buildPurchaseInvoiceNotes(extractedValues, confidence, rawText);
+  const confidence = method === "ocr" && ocrConfidence ? Math.round((ocrConfidence + Math.min(100, (confidenceFields / 13) * 100)) / 2) : Math.min(99, Math.max(45, Math.round((confidenceFields / 13) * 100)));
+  const requiredDetections: Array<[string, unknown]> = [
+    ["Platform Name", platform],
+    ["Purchased By", customerName],
+    ["Purchase Date", purchaseDate],
+    ["Payment Method", paymentMethod !== "Other"],
+    ["Amount Paid", amountPaid],
+  ];
+  const missingFields = requiredDetections.filter(([, value]) => !value).map(([label]) => label);
+  const notes = buildPurchaseInvoiceNotes(extractedValues, confidence, rawText, method, missingFields);
   return {
     values: extractedValues,
     notes,
     confidence,
+    missingFields,
     extractedJson: {
+      extraction_method: method,
+      missing_fields: missingFields,
       platform: extractedValues.platform,
+      invoice_name: extractedValues.invoice_name,
       plan: extractedValues.subscription_plan,
       invoice_number: extractedValues.invoice_number,
+      invoice_date: extractedValues.purchase_date,
+      due_date: extractedValues.due_date || null,
+      subtotal: extractedValues.subtotal,
+      tax: extractedValues.tax_amount,
+      discount: extractedValues.discount_amount,
+      total_amount: extractedValues.purchase_amount,
+      amount_paid: extractedValues.amount_paid,
+      balance_due: extractedValues.balance_due,
+      payment_status: extractedValues.payment_status,
       purchase_amount: extractedValues.purchase_amount,
       currency: extractedValues.currency,
       credits: extractedValues.total_credits_purchased,
       vendor: extractedValues.vendor,
       payment_method: extractedValues.payment_method,
+      customer_name: extractedValues.customer_name || null,
+      billing_address: extractedValues.billing_address || null,
       purchase_date: extractedValues.purchase_date,
       expiry_date: extractedValues.expiry_date || null
     },
@@ -1427,33 +1703,30 @@ function extractCreditPurchaseInvoice(filename: string, rawText: string) {
   };
 }
 
-function buildPurchaseInvoiceNotes(values: Partial<PurchaseFormValues>, confidence: number, rawText: string) {
+function buildPurchaseInvoiceNotes(values: Partial<PurchaseFormValues>, confidence: number, rawText: string, method: "pdf-text" | "ocr", missingFields: string[]) {
   const summary = [
-    `Platform:`,
+    `Invoice imported automatically from uploaded PDF.`,
+    ``,
+    `Platform Name:`,
     `${values.platform ?? "Not detected"}`,
     ``,
-    `Plan:`,
-    `${values.subscription_plan ?? "Not detected"}`,
-    ``,
-    `Invoice Number:`,
-    `${values.invoice_number ?? "Not detected"}`,
+    `Purchased By:`,
+    `${values.customer_name || "Not detected"}`,
     ``,
     `Purchase Date:`,
     `${values.purchase_date ? formatDate(values.purchase_date) : "Not detected"}`,
     ``,
-    `Credits Purchased:`,
-    `${values.total_credits_purchased ? formatNumber(values.total_credits_purchased) : "Not detected"}`,
+    `Payment Method:`,
+    `${values.payment_method ?? "Not detected"}`,
     ``,
     `Amount Paid:`,
     `${values.currency ?? ""} ${values.purchase_amount ? formatNumber(values.purchase_amount) : "Not detected"}`.trim(),
     ``,
-    `Vendor:`,
-    `${values.vendor ?? "Not detected"}`,
+    `Extraction Method:`,
+    method === "pdf-text" ? "PDF text extraction" : "Tesseract OCR",
     ``,
-    `Payment Method:`,
-    `${values.payment_method ?? "Not detected"}`,
-    ``,
-    `Invoice uploaded automatically.`,
+    `Missing Fields:`,
+    missingFields.length ? missingFields.join(", ") : "None",
     ``,
     `OCR Confidence:`,
     `${confidence}%`
@@ -1466,6 +1739,7 @@ function detectPlatform(text: string): Platform {
   const lower = text.toLowerCase();
   const match = PLATFORMS.find((platform) => lower.includes(platform.toLowerCase().replace(" ai", "")));
   if (match) return match;
+  if (lower.includes(["fr", "eepik"].join(""))) return "Magnific";
   if (lower.includes("openai") || lower.includes("chatgpt")) return "ChatGPT";
   if (lower.includes("anthropic") || lower.includes("claude")) return "Claude";
   if (lower.includes("google") || lower.includes("gemini")) return "Gemini";
@@ -1486,11 +1760,21 @@ function detectCurrency(text: string) {
 function detectPaymentMethod(text: string): PaymentMethod {
   const lower = text.toLowerCase();
   if (lower.includes("upi")) return "UPI";
+  if (lower.includes("paypal")) return "PayPal";
+  if (lower.includes("bank card") || lower.includes("card ending") || lower.includes("ending in")) return "Credit Card";
   if (lower.includes("debit")) return "Debit Card";
-  if (lower.includes("credit card") || lower.includes("visa") || lower.includes("mastercard")) return "Credit Card";
+  if (lower.includes("credit card") || lower.includes("visa") || lower.includes("mastercard") || lower.includes("amex")) return "Credit Card";
   if (lower.includes("net banking")) return "Net Banking";
-  if (lower.includes("bank transfer") || lower.includes("wire transfer")) return "Bank Transfer";
-  return "UPI";
+  if (lower.includes("bank transfer") || lower.includes("wire transfer") || lower.includes("ach") || lower.includes("sepa")) return "Bank Transfer";
+  return "Other";
+}
+
+function detectPaymentStatus(text: string, balanceDue: number, amountPaid: number, totalAmount: number): PurchaseFormValues["payment_status"] {
+  const lower = text.toLowerCase();
+  if (lower.includes("partially paid") || (balanceDue > 0 && amountPaid > 0 && amountPaid < totalAmount)) return "Partially Paid";
+  if (lower.includes("unpaid") || lower.includes("payment due") || balanceDue > 0) return "Unpaid";
+  if (lower.includes("paid") || lower.includes("payment received") || (totalAmount > 0 && amountPaid >= totalAmount)) return "Paid";
+  return "Unknown";
 }
 
 function pickMatch(text: string, patterns: RegExp[]) {
@@ -1513,6 +1797,32 @@ function cleanExtractedText(value: string) {
 function normalizeInvoiceDate(value: string) {
   if (!value) return "";
   const normalized = value.trim().replace(/\./g, "/");
+  const monthNames: Record<string, string> = {
+    jan: "01", january: "01",
+    feb: "02", february: "02",
+    mar: "03", march: "03",
+    apr: "04", april: "04",
+    may: "05",
+    jun: "06", june: "06",
+    jul: "07", july: "07",
+    aug: "08", august: "08",
+    sep: "09", sept: "09", september: "09",
+    oct: "10", october: "10",
+    nov: "11", november: "11",
+    dec: "12", december: "12"
+  };
+  const dayMonthYear = normalized.match(/^(\d{1,2})\s+([a-z]{3,9}),?\s+(20\d{2})$/i);
+  if (dayMonthYear) {
+    const [, day, month, year] = dayMonthYear;
+    const numericMonth = monthNames[month.toLowerCase()];
+    if (numericMonth) return `${year}-${numericMonth}-${day.padStart(2, "0")}`;
+  }
+  const monthDayYear = normalized.match(/^([a-z]{3,9})\s+(\d{1,2}),?\s+(20\d{2})$/i);
+  if (monthDayYear) {
+    const [, month, day, year] = monthDayYear;
+    const numericMonth = monthNames[month.toLowerCase()];
+    if (numericMonth) return `${year}-${numericMonth}-${day.padStart(2, "0")}`;
+  }
   const numeric = normalized.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$/);
   if (numeric) {
     const [, first, second, year] = numeric;
@@ -1525,37 +1835,14 @@ function normalizeInvoiceDate(value: string) {
   return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().slice(0, 10);
 }
 
-function extractInvoiceData(filename: string) {
-  const source = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ");
-  const invoice = source.match(/\b(?:inv|invoice)\s*([a-z0-9]+)/i)?.[1];
-  const amount = source.match(/(?:₹|rs|inr|usd|\$)?\s*(\d+(?:\.\d{1,2})?)\s*(?:inr|usd|rs)?/i)?.[1];
-  const tax = source.match(/\btax\s*(\d+(?:\.\d{1,2})?)/i)?.[1];
-  const total = source.match(/\btotal\s*(\d+(?:\.\d{1,2})?)/i)?.[1];
-  const credits = source.match(/(\d+)\s*(?:credits|credit|cr)\b/i)?.[1];
-  const email = source.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
-  const vendor = detectVendor(source);
-  const invoiceDate = source.match(/\b(20\d{2})[ ./-](0?[1-9]|1[0-2])[ ./-](0?[1-9]|[12]\d|3[01])\b/)?.[0];
-  const values: Partial<PaymentFormValues> = {
-    invoice_number: invoice ? `INV-${invoice.toUpperCase()}` : generateInvoiceNumber(),
-    vendor,
-    customer_email: email ?? "",
-    customer_name: email ? email.split("@")[0].replace(/[._-]+/g, " ") : "",
-    amount: amount ? Number(amount) : 0,
-    credits: credits ? Number(credits) : 0,
-    tax_amount: tax ? Number(tax) : 0,
-    total_amount: total ? Number(total) : amount ? Number(amount) : 0,
-    currency: source.toLowerCase().includes("usd") || source.includes("$") ? "USD" : "INR",
-    payment_id: source.match(/\bpay(?:ment)?\s*([a-z0-9]+)/i)?.[1] ?? `PAY-${Date.now()}`,
-    transaction_id: source.match(/\btxn\s*([a-z0-9]+)/i)?.[1] ?? `TXN-${Date.now()}`,
-    order_id: source.match(/\border\s*([a-z0-9]+)/i)?.[1] ?? `ORD-${Date.now()}`,
-    paid_at: invoiceDate ? new Date(invoiceDate).toISOString().slice(0, 16) : new Date().toISOString().slice(0, 16)
-  };
-  const populated = Object.values(values).filter((value) => value !== "" && value !== 0).length;
-  return { values, confidence: Math.min(96, Math.max(42, populated * 11)) };
-}
-
 function detectVendor(text: string) {
-  const vendors = ["OpenAI", "ChatGPT", "Anthropic", "Claude", "Google Gemini", "Gemini", "Grok", "Midjourney", "Magnific", "Leonardo AI", "Adobe Firefly", "Stability AI", "Runway", "Flux", "Cursor", "GitHub Copilot"];
+  const genericVendor = pickMatch(text, [
+    /(?:vendor|supplier|merchant|seller|from|issued by|billed by)[:\s-]*([a-z0-9 .,&+'-]{2,60})/i,
+    /^([a-z0-9 .,&+'-]{2,50})\s+(?:invoice|receipt)/i
+  ]);
+  if (genericVendor) return genericVendor;
+  const legacyProvider = ["fr", "eepik"].join("");
+  const vendors = ["OpenAI", "ChatGPT", "Anthropic", "Claude", "Google", "Google Gemini", "Gemini", "Grok", "Midjourney", "Magnific", legacyProvider, "Replicate", "Runway", "ElevenLabs", "Fal.ai", "Leonardo AI", "Adobe Firefly", "Stability AI", "Flux", "Cursor", "GitHub Copilot"];
   return vendors.find((vendor) => text.toLowerCase().includes(vendor.toLowerCase().replace(" ai", ""))) ?? "";
 }
 
@@ -1673,35 +1960,34 @@ function CreditProgressCard({
 
 function UsageForm({ currentUser, record, records, purchases, onDone }: { currentUser: Profile; record: AiUsage | null; records: AiUsage[]; purchases: CreditPurchase[]; onDone: () => void }) {
   const { toast } = useToast();
-  const [customCategories, setCustomCategories] = useState<string[]>([]);
-  const [customCategory, setCustomCategory] = useState("");
   const form = useForm<AiUsageFormValues>({
     resolver: zodResolver(aiUsageSchema),
     defaultValues: record
       ? {
           date: record.date,
           platform: record.platform,
-          category: record.category || "Custom",
+          category: USAGE_CATEGORIES.includes(record.category as (typeof USAGE_CATEGORIES)[number])
+            ? record.category as (typeof USAGE_CATEGORIES)[number]
+            : "Design Studio",
           buy_credits: record.buy_credits,
           description: record.description,
           number_of_styles: record.number_of_styles,
           number_of_images: record.number_of_images,
           credits_used: record.credits_used,
-          supplier_requirements:
-            record.supplier_requirements === "Renga" || record.supplier_requirements === "Syed"
-              ? record.supplier_requirements
-              : "Renga"
+          supplier_requirements: SUPPLIERS.includes(record.supplier_requirements as (typeof SUPPLIERS)[number])
+            ? record.supplier_requirements as (typeof SUPPLIERS)[number]
+            : "Syad"
         }
       : {
           date: new Date().toISOString().slice(0, 10),
           platform: "ChatGPT",
-          category: "Fashion",
+          category: "Design Studio",
           buy_credits: DEFAULT_PLATFORM_CREDIT_PACKS.ChatGPT ?? 0,
           description: "",
           number_of_styles: 0,
           number_of_images: 0,
           credits_used: 0,
-          supplier_requirements: "Renga"
+          supplier_requirements: "Syad"
         }
   });
   const selectedPlatform = form.watch("platform");
@@ -1723,16 +2009,8 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
   }, [creditsUsed, form, totalImages]);
 
   useEffect(() => {
-    getUsageCategories().then(setCustomCategories).catch(console.error);
-  }, []);
-
-  useEffect(() => {
     form.setValue("buy_credits", getPlatformPurchasedCredits(selectedPlatform), { shouldValidate: true });
   }, [purchases, selectedPlatform]);
-
-  function allCategories() {
-    return Array.from(new Set([...USAGE_CATEGORIES, ...customCategories])).sort((a, b) => a.localeCompare(b));
-  }
 
   function getPlatformPurchasedCredits(platform: Platform) {
     return purchases
@@ -1741,11 +2019,6 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
   }
 
   async function onSubmit(values: AiUsageFormValues) {
-    const finalCategory = values.category === "__custom" ? customCategory.trim() : values.category;
-    if (!finalCategory) {
-      toast({ title: "Category required", description: "Select or create a usage category.", variant: "destructive" });
-      return;
-    }
     if (insufficientCredits) {
       toast({
         title: "Insufficient Credits. Please purchase more credits.",
@@ -1758,16 +2031,15 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
       await saveUsage(
         {
           ...values,
-          category: finalCategory,
+          category: values.category,
           buy_credits: purchasedCredits,
           number_of_images: totalImages,
           credits_used: creditsUsed,
-          supplier_requirements: values.supplier_requirements || "Renga",
+          supplier_requirements: values.supplier_requirements,
           user_id: record?.user_id ?? currentUser.id
         },
         record?.id
       );
-      if (values.category === "__custom") await saveUsageCategory(finalCategory);
       toast({ title: record ? "Usage updated" : "Usage created" });
       onDone();
     } catch (error) {
@@ -1792,19 +2064,13 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
         </Select>
       </Field>
       <Field label="Category" error={form.formState.errors.category?.message}>
-        <Select value={selectedCategory} onValueChange={(value) => form.setValue("category", value, { shouldValidate: true })}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
+        <Select value={selectedCategory} onValueChange={(value) => form.setValue("category", value as (typeof USAGE_CATEGORIES)[number], { shouldValidate: true })}>
+          <SelectTrigger><SelectValue placeholder="Select Category" /></SelectTrigger>
           <SelectContent>
-            {allCategories().map((category) => <SelectItem key={category} value={category}>{category}</SelectItem>)}
-            <SelectItem value="__custom">Custom Category</SelectItem>
+            {USAGE_CATEGORIES.map((category) => <SelectItem key={category} value={category}>{category}</SelectItem>)}
           </SelectContent>
         </Select>
       </Field>
-      {selectedCategory === "__custom" ? (
-        <Field label="Custom Category" className="sm:col-span-2">
-          <Input value={customCategory} onChange={(event) => setCustomCategory(event.target.value)} placeholder="Enter new category" />
-        </Field>
-      ) : null}
       <Field label="Number of Styles" error={form.formState.errors.number_of_styles?.message}><Input type="number" min="0" {...form.register("number_of_styles")} /></Field>
       <div className="grid gap-3 rounded-md border bg-muted/35 p-4 sm:col-span-2 sm:grid-cols-3">
         <CalculationItem label="Purchased Credits" value={purchasedCredits} />
@@ -1829,8 +2095,8 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
       </div>
       <Field label="Description / Purpose" error={form.formState.errors.description?.message} className="sm:col-span-2"><Textarea {...form.register("description")} /></Field>
       <Field label="Supplier" className="sm:col-span-2">
-        <Select value={form.watch("supplier_requirements") || "Renga"} onValueChange={(value) => form.setValue("supplier_requirements", value, { shouldValidate: true })}>
-          <SelectTrigger><SelectValue /></SelectTrigger>
+        <Select value={form.watch("supplier_requirements")} onValueChange={(value) => form.setValue("supplier_requirements", value as (typeof SUPPLIERS)[number], { shouldValidate: true })}>
+          <SelectTrigger><SelectValue placeholder="Select Supplier" /></SelectTrigger>
           <SelectContent>
             {SUPPLIERS.map((supplier) => <SelectItem key={supplier} value={supplier}>{supplier}</SelectItem>)}
           </SelectContent>
@@ -1895,15 +2161,15 @@ function PaymentsPage({ profile }: { profile: Profile }) {
   }, [profile]);
 
   const filtered = payments.filter((payment) =>
-    `${payment.customer_name} ${payment.customer_email} ${payment.payment_id} ${payment.transaction_id} ${payment.order_id} ${payment.invoice_number} ${payment.vendor}`.toLowerCase().includes(search.toLowerCase())
+    `${payment.customer_name} ${payment.customer_email} ${payment.invoice_number} ${payment.vendor} ${payment.payment_method}`.toLowerCase().includes(search.toLowerCase())
   );
   const filteredLedger = ledger.filter((entry) =>
     `${entry.customer_email} ${entry.payment_id} ${entry.invoice_number}`.toLowerCase().includes(search.toLowerCase())
   );
 
   function exportPayments() {
-    const header = ["Customer", "Email", "Payment ID", "Transaction ID", "Order ID", "Amount", "Currency", "Credits", "Method", "Vendor", "Invoice"];
-    const rows = filtered.map((p) => [p.customer_name, p.customer_email, p.payment_id, p.transaction_id, p.order_id, p.amount, p.currency, p.credits, p.payment_method, p.vendor, p.invoice_number]);
+    const header = ["Purchased By", "Email", "Platform", "Purchase Date", "Amount Paid", "Currency", "Credits", "Method", "Invoice"];
+    const rows = filtered.map((p) => [p.customer_name, p.customer_email, p.vendor, p.paid_at, p.amount, p.currency, p.credits, p.payment_method, p.invoice_number]);
     const csv = [header, ...rows].map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
@@ -1917,8 +2183,8 @@ function PaymentsPage({ profile }: { profile: Profile }) {
     <>
       <PageHeader
         title="Payments"
-        description={profile.role === "admin" ? "Manage all customer payment records." : "View your payment history."}
-        action={<div className="flex gap-2"><Button variant="outline" onClick={exportPayments}>Export</Button><Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Payment</Button></div>}
+        description={profile.role === "admin" ? "Upload invoices and add AI credits without accounting clutter." : "View your payment history."}
+        action={<div className="flex gap-2"><Button variant="outline" onClick={exportPayments}>Export</Button><Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Credit Purchase</Button></div>}
       />
       <Card className="mb-4">
         <CardContent className="p-4">
@@ -1926,23 +2192,21 @@ function PaymentsPage({ profile }: { profile: Profile }) {
         </CardContent>
       </Card>
       <DataTable
-        headers={["Customer", "Payment ID", "Order", "Amount Paid", "Credits", "Method", "Vendor", "Invoice", "Date", ""]}
+        headers={["Purchased By", "Platform", "Purchase Date", "Amount Paid", "Credits", "Method", "Invoice", ""]}
         empty="No payments found."
         rows={filtered.map((payment) => [
-          `${payment.customer_name} (${payment.customer_email})`,
-          payment.payment_id,
-          payment.order_id,
+          payment.customer_name,
+          payment.vendor,
+          formatDate(payment.paid_at),
           `${payment.currency} ${formatNumber(payment.amount)}`,
           formatNumber(payment.credits ?? 0),
           payment.payment_method,
-          payment.vendor,
           payment.invoice_file ? (
             <div className="flex gap-2" key={`${payment.id}-invoice`}>
               <Button size="sm" variant="outline" onClick={() => setInvoicePreview(payment.invoice_file)}>View Invoice</Button>
               <Button size="sm" variant="outline" onClick={() => downloadInvoice(payment.invoice_file!)}>Download</Button>
             </div>
           ) : payment.invoice_number,
-          formatDate(payment.paid_at),
           <div className="flex gap-2" key={payment.id}>
             <Button variant="outline" size="sm" onClick={() => { setEditing(payment); setOpen(true); }}>View/Edit</Button>
             {profile.role === "admin" ? <Button variant="destructive" size="sm" onClick={async () => { await deletePayment(payment.id); refresh(); }}>Delete</Button> : null}
@@ -1965,7 +2229,7 @@ function PaymentsPage({ profile }: { profile: Profile }) {
       </div>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
-          <DialogHeader><DialogTitle>{editing ? "Payment Details" : "New Payment"}</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>{editing ? "Credit Purchase Details" : "New Credit Purchase"}</DialogTitle></DialogHeader>
           <PaymentForm currentUser={profile} payment={editing} onDone={() => { setOpen(false); refresh(); }} />
         </DialogContent>
       </Dialog>
@@ -2003,9 +2267,9 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
       : {
           customer_name: currentUser.full_name,
           customer_email: currentUser.email,
-          payment_id: "",
-          transaction_id: "",
-          order_id: "",
+          payment_id: `PAY-${Date.now()}`,
+          transaction_id: `TXN-${Date.now()}`,
+          order_id: `ORD-${Date.now()}`,
           amount: 0,
           credits: 0,
           tax_amount: 0,
@@ -2030,18 +2294,35 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
     const nextInvoice: InvoiceFile = { name: file.name, type: file.type, size: file.size, data_url, uploaded_at: new Date().toISOString() };
     setInvoice(nextInvoice);
     setProcessingStep("Reading Invoice...");
-    await wait(300);
+    const extractedText = await extractTextFromInvoiceFile(file, setProcessingStep);
     setProcessingStep("Extracting Information...");
-    await wait(300);
-    setProcessingStep("Calculating Credits...");
-    await wait(250);
-    const extracted = extractInvoiceData(file.name);
-    Object.entries(extracted.values).forEach(([key, value]) => {
+    const extractedPurchase = extractCreditPurchaseInvoice(file.name, extractedText.text, extractedText.method, extractedText.ocrConfidence);
+    const values: Partial<PaymentFormValues> = {
+      customer_name: extractedPurchase.values.customer_name || currentUser.full_name,
+      customer_email: currentUser.email,
+      payment_id: `PAY-${Date.now()}`,
+      transaction_id: `TXN-${Date.now()}`,
+      order_id: `ORD-${Date.now()}`,
+      amount: Number(extractedPurchase.values.purchase_amount || extractedPurchase.values.amount_paid || 0),
+      currency: extractedPurchase.values.currency || "INR",
+      payment_method: extractedPurchase.values.payment_method || "Other",
+      vendor: extractedPurchase.values.vendor || extractedPurchase.values.platform || "",
+      paid_at: `${extractedPurchase.values.purchase_date || new Date().toISOString().slice(0, 10)}T${new Date().toTimeString().slice(0, 5)}`,
+      invoice_number: extractedPurchase.values.invoice_number || generateInvoiceNumber(),
+      notes: extractedPurchase.notes
+    };
+    Object.entries(values).forEach(([key, value]) => {
       if (value !== undefined && value !== "") form.setValue(key as keyof PaymentFormValues, value as never, { shouldValidate: true });
     });
-    setProcessingStep("Almost Done...");
-    await wait(250);
-    setConfidence(extracted.confidence);
+    setProcessingStep("Populating Form...");
+    await wait(150);
+    setConfidence(extractedPurchase.confidence);
+    if (extractedPurchase.missingFields.length > 0) {
+      toast({
+        title: "Invoice extracted",
+        description: `Missing: ${extractedPurchase.missingFields.join(", ")}`
+      });
+    }
     setProcessingStep("");
   }
 
@@ -2052,23 +2333,29 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
   }
 
   async function onSubmit(values: PaymentFormValues) {
-    if (!invoice) {
-      toast({ title: "Invoice required", description: "Upload an invoice before saving.", variant: "destructive" });
-      return;
-    }
     try {
+      const customerEmail = values.customer_email || currentUser.email;
+      const paymentId = values.payment_id || `PAY-${Date.now()}`;
+      const transactionId = values.transaction_id || `TXN-${Date.now()}`;
+      const orderId = values.order_id || `ORD-${Date.now()}`;
       await savePayment({
         ...values,
         user_id: payment?.user_id ?? currentUser.id,
+        customer_email: customerEmail,
+        payment_id: paymentId,
+        transaction_id: transactionId,
+        order_id: orderId,
+        currency: values.currency || "INR",
+        invoice_number: values.invoice_number || generateInvoiceNumber(),
         payment_detail: null,
         payment_status: "Paid",
-        tax_amount: Number(values.tax_amount || 0),
-        total_amount: Number(values.total_amount || values.amount || 0),
+        tax_amount: 0,
+        total_amount: Number(values.amount || 0),
         invoice_file: invoice,
-        invoice_file_url: invoice.data_url,
+        invoice_file_url: invoice?.data_url ?? null,
         notes: values.notes || null
       }, payment?.id);
-      const credits = await getUserCredits(values.customer_email);
+      const credits = await getUserCredits(customerEmail);
       toast({ title: "Payment Saved Successfully", description: `Credits Updated. Current Credits: ${formatNumber(credits)} Credits` });
       onDone();
     } catch (error) {
@@ -2110,25 +2397,17 @@ function PaymentForm({ currentUser, payment, onDone }: { currentUser: Profile; p
           ) : null}
         </div>
       </div>
-      <Field label="Customer Name" error={form.formState.errors.customer_name?.message}><Input {...form.register("customer_name")} /></Field>
-      <Field label="Customer Email" error={form.formState.errors.customer_email?.message}><Input type="email" {...form.register("customer_email")} /></Field>
-      <Field label="Payment ID" error={form.formState.errors.payment_id?.message}><Input {...form.register("payment_id")} /></Field>
-      <Field label="Transaction ID" error={form.formState.errors.transaction_id?.message}><Input {...form.register("transaction_id")} /></Field>
-      <Field label="Order ID" error={form.formState.errors.order_id?.message}><Input {...form.register("order_id")} /></Field>
-      <Field label="Amount Paid" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
-      <Field label="Credits Purchased" error={form.formState.errors.credits?.message}><Input type="number" min="1" {...form.register("credits")} /></Field>
-      <Field label="Tax Amount" error={form.formState.errors.tax_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("tax_amount")} /></Field>
-      <Field label="Total Amount" error={form.formState.errors.total_amount?.message}><Input type="number" min="0" step="0.01" {...form.register("total_amount")} /></Field>
-      <Field label="Currency" error={form.formState.errors.currency?.message}><Input {...form.register("currency")} /></Field>
-      <Field label="AI Platform / Vendor Name" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
+      <Field label="Platform Name" error={form.formState.errors.vendor?.message}><Input {...form.register("vendor")} /></Field>
+      <Field label="Purchased By" error={form.formState.errors.customer_name?.message}><Input {...form.register("customer_name")} /></Field>
+      <Field label="Purchase Date" error={form.formState.errors.paid_at?.message}><Input type="datetime-local" {...form.register("paid_at")} /></Field>
       <Field label="Payment Method">
         <Select value={form.watch("payment_method")} onValueChange={(value) => form.setValue("payment_method", value as PaymentMethod)}>
           <SelectTrigger><SelectValue /></SelectTrigger>
-          <SelectContent>{["UPI", "Credit Card", "Debit Card", "Net Banking", "Bank Transfer"].map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
+          <SelectContent>{PAYMENT_METHODS.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}</SelectContent>
         </Select>
       </Field>
-      <Field label="Current Server Time" error={form.formState.errors.paid_at?.message}><Input type="datetime-local" {...form.register("paid_at")} /></Field>
-      <Field label="Invoice Number" error={form.formState.errors.invoice_number?.message}><Input {...form.register("invoice_number")} /></Field>
+      <Field label="Amount Paid" error={form.formState.errors.amount?.message}><Input type="number" min="0" step="0.01" {...form.register("amount")} /></Field>
+      <Field label="Credits" error={form.formState.errors.credits?.message}><Input type="number" min="1" {...form.register("credits")} /></Field>
       <Field label="Notes" className="sm:col-span-2"><Textarea {...form.register("notes")} /></Field>
       <div className="flex justify-end gap-2 sm:col-span-2">
         <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
