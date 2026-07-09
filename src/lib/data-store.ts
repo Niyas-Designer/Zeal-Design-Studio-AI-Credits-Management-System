@@ -1,21 +1,18 @@
-import {
-  browserLocalPersistence,
-  browserSessionPersistence,
-  createUserWithEmailAndPassword,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  sendEmailVerification,
-  sendPasswordResetEmail,
-  setPersistence,
-  signInWithEmailAndPassword,
-  signInWithPopup,
-  signOut as firebaseSignOut,
-  updateProfile,
-  type User
-} from "firebase/auth";
-import { auth } from "@/lib/firebase";
-import { AI_TOOL_CATEGORIES, AI_TOOL_LOGOS, DEFAULT_AI_TOOLS } from "@/lib/ai-tools";
+import { DEFAULT_AI_TOOLS } from "@/lib/ai-tools";
 import { SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
+import {
+  firebaseGetCurrentProfile,
+  firebaseGetUsers,
+  firebaseGoogleSignIn,
+  firebaseLogout,
+  firebaseOnAuthChange,
+  firebaseResetPassword,
+  firebaseSetUserDisabled,
+  firebaseSignIn,
+  firebaseSignUp,
+  firebaseUpdateUserRole
+} from "@/lib/firebase";
+import { ensureSupabase, supabase } from "@/lib/supabase";
 import type {
   AiUsage,
   AiUsageInput,
@@ -30,433 +27,29 @@ import type {
   UserRole
 } from "@/lib/types";
 
-const USERS_STATE_KEY = "zeal_frontend_user_state";
-const USER_CREDITS_KEY = "zeal_user_credits";
-const USAGE_KEY = "zeal_ai_usage_records";
-const PAYMENTS_KEY = "zeal_payment_records";
-const CREDIT_LEDGER_KEY = "zeal_credit_ledger";
-const AI_TOOLS_KEY = "zeal_ai_studio_tools";
-const PURCHASES_KEY = "zeal_credit_purchases";
-const USAGE_CATEGORIES_KEY = "zeal_usage_categories";
-const ADMIN_EMAILS = new Set(["niyas.zealdesigner@gmail.com"]);
-
 function now() {
   return new Date().toISOString();
 }
 
-function id(prefix: string) {
-  return `${prefix}_${crypto.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(16).slice(2)}`}`;
-}
-
-function readJson<T>(key: string, fallback: T): T {
-  try {
-    const value = localStorage.getItem(key);
-    return value ? (JSON.parse(value) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeJson<T>(key: string, value: T) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
-
-function ensureAuth() {
-  if (!auth) {
-    throw new Error("Firebase is not configured yet. Add your Firebase environment variables and restart the app.");
-  }
-  return auth;
-}
-
-function friendlyAuthError(error: unknown) {
-  const code = typeof error === "object" && error && "code" in error ? String(error.code) : "";
-
-  const messages: Record<string, string> = {
-    "auth/account-exists-with-different-credential": "An account already exists with another sign-in method.",
-    "auth/email-already-in-use": "This email is already registered. Please sign in instead.",
-    "auth/invalid-credential": "Invalid Email or Password.",
-    "auth/invalid-email": "Enter a valid email address.",
-    "auth/network-request-failed": "Network error. Please check your connection and try again.",
-    "auth/popup-closed-by-user": "Google sign-in was cancelled.",
-    "auth/too-many-requests": "Too many attempts. Please wait a moment and try again.",
-    "auth/user-disabled": "This account has been disabled.",
-    "auth/user-not-found": "No account was found for this email.",
-    "auth/weak-password": "Password is too weak. Use at least 8 characters.",
-    "auth/wrong-password": "Invalid Email or Password."
-  };
-
-  return messages[code] ?? (error instanceof Error ? error.message : "Authentication failed. Please try again.");
-}
-
-function passwordProviderNeedsVerification(user: User) {
-  return user.providerData.some((provider) => provider.providerId === "password") && !user.emailVerified;
-}
-
-function profileFromAuthUser(user: User): Profile {
-  const email = user.email ?? "";
-  const credits = readJson<Record<string, number>>(USER_CREDITS_KEY, {});
-  const state = readJson<Record<string, Partial<Pick<Profile, "role" | "disabled" | "updated_at">>>>(
-    USERS_STATE_KEY,
-    {}
-  );
-  const overrides = state[user.uid] ?? {};
-  const createdAt = user.metadata.creationTime ? new Date(user.metadata.creationTime).toISOString() : now();
-  const updatedAt = user.metadata.lastSignInTime ? new Date(user.metadata.lastSignInTime).toISOString() : createdAt;
-
-  return {
-    id: user.uid,
-    email,
-    full_name: user.displayName || email.split("@")[0] || "Fashion User",
-    role: (overrides.role ?? (ADMIN_EMAILS.has(email) ? "admin" : "user")) as UserRole,
-    disabled: overrides.disabled ?? false,
-    credits: credits[email.toLowerCase()] ?? 0,
-    created_at: createdAt,
-    updated_at: overrides.updated_at ?? updatedAt
-  };
-}
-
-function withProfile<T extends { user_id: string; profiles?: Pick<Profile, "email" | "full_name"> | null }>(
-  record: T,
-  currentUser?: Profile
-) {
-  const profile = currentUser?.id === record.user_id ? currentUser : null;
-  return {
-    ...record,
-    profiles: profile ? { email: profile.email, full_name: profile.full_name } : record.profiles ?? null
-  };
-}
-
-export async function getCurrentUser() {
-  const user = auth?.currentUser;
-  if (!user || passwordProviderNeedsVerification(user)) return null;
-
-  const profile = profileFromAuthUser(user);
-  return profile.disabled ? null : profile;
-}
-
-export async function signIn(email: string, password: string, remember = true) {
-  try {
-    const client = ensureAuth();
-    await setPersistence(client, remember ? browserLocalPersistence : browserSessionPersistence);
-    const credential = await signInWithEmailAndPassword(client, email, password);
-    if (passwordProviderNeedsVerification(credential.user)) {
-      await sendEmailVerification(credential.user);
-      await firebaseSignOut(client);
-      throw new Error("Please verify your email before signing in. We sent a new verification email.");
-    }
-    const profile = profileFromAuthUser(credential.user);
-    if (profile.disabled) throw new Error("This account has been disabled.");
-    return profile;
-  } catch (error) {
-    throw new Error(friendlyAuthError(error));
-  }
-}
-
-export async function signUp(email: string, password: string, fullName: string) {
-  try {
-    const client = ensureAuth();
-    const credential = await createUserWithEmailAndPassword(client, email, password);
-    await updateProfile(credential.user, { displayName: fullName });
-    await sendEmailVerification(credential.user);
-    await firebaseSignOut(client);
-  } catch (error) {
-    throw new Error(friendlyAuthError(error));
-  }
-}
-
-export async function signInWithGoogle(remember = true) {
-  try {
-    const client = ensureAuth();
-    await setPersistence(client, remember ? browserLocalPersistence : browserSessionPersistence);
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: "select_account" });
-    const credential = await signInWithPopup(client, provider);
-    const profile = profileFromAuthUser(credential.user);
-    if (profile.disabled) {
-      await firebaseSignOut(client);
-      throw new Error("This account has been disabled.");
-    }
-    return profile;
-  } catch (error) {
-    throw new Error(friendlyAuthError(error));
-  }
-}
-
-export async function simulatePasswordReset(email: string) {
-  try {
-    await sendPasswordResetEmail(ensureAuth(), email);
-  } catch (error) {
-    throw new Error(friendlyAuthError(error));
-  }
-}
-
-export async function signOut() {
-  await firebaseSignOut(ensureAuth());
-}
-
-export function onAuthChange(callback: (profile: Profile | null) => void) {
-  if (!auth) {
-    callback(null);
-    return () => undefined;
-  }
-
-  return onAuthStateChanged(auth, (user) => {
-    if (!user || passwordProviderNeedsVerification(user)) {
-      callback(null);
-      return;
-    }
-
-    const profile = profileFromAuthUser(user);
-    callback(profile.disabled ? null : profile);
-  });
-}
-
-export async function getUsers() {
-  const currentUser = await getCurrentUser();
-  return currentUser ? [currentUser] : [];
-}
-
-export async function updateUserRole(_userId: string, _role: UserRole) {
-  const state = readJson<Record<string, Partial<Pick<Profile, "role" | "disabled" | "updated_at">>>>(
-    USERS_STATE_KEY,
-    {}
-  );
-  writeJson(USERS_STATE_KEY, {
-    ...state,
-    [_userId]: {
-      ...state[_userId],
-      role: _role,
-      updated_at: now()
-    }
-  });
-}
-
-export async function setUserDisabled(_userId: string, _disabled: boolean) {
-  const state = readJson<Record<string, Partial<Pick<Profile, "role" | "disabled" | "updated_at">>>>(
-    USERS_STATE_KEY,
-    {}
-  );
-  writeJson(USERS_STATE_KEY, {
-    ...state,
-    [_userId]: {
-      ...state[_userId],
-      disabled: _disabled,
-      updated_at: now()
-    }
-  });
-}
-
-export async function getUsage(currentUser: Profile) {
-  const rawRecords = readJson<AiUsage[]>(USAGE_KEY, []);
-  const records = rawRecords.map(normalizeUsageRecord);
-  if (JSON.stringify(rawRecords) !== JSON.stringify(records)) writeJson(USAGE_KEY, records);
-  const visible = currentUser.role === "admin" ? records : records.filter((record) => record.user_id === currentUser.id);
-  return visible
-    .map((record) => withProfile(record, currentUser))
-    .sort((a, b) => b.date.localeCompare(a.date));
-}
-
-export async function saveUsage(input: AiUsageInput, recordId?: string) {
-  const records = readJson<AiUsage[]>(USAGE_KEY, []).map(normalizeUsageRecord);
-  const timestamp = now();
-  const numberOfStyles = Number(input.number_of_styles) || 0;
-  const calculatedImages = numberOfStyles * 6;
-  const calculatedCreditsUsed = calculatedImages * 150;
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
-  const purchasedCredits = purchases
-    .filter((purchase) => purchase.user_id === input.user_id && purchase.platform === input.platform)
-    .reduce((sum, purchase) => sum + Number(purchase.total_credits_purchased || 0), 0);
-  const previousPlatformUsage = records
-    .filter((record) => record.id !== recordId && record.user_id === input.user_id && record.platform === input.platform)
-    .reduce((sum, record) => sum + Number(record.credits_used || 0), 0);
-  const remainingCredits = purchasedCredits - previousPlatformUsage - calculatedCreditsUsed;
-  if (remainingCredits < 0) {
-    throw new Error("Insufficient Credits. Please purchase more credits.");
-  }
-  const calculatedInput = {
-    ...input,
-    category: normalizeUsageCategory(input.category),
-    supplier_requirements: normalizeSupplier(input.supplier_requirements),
-    buy_credits: purchasedCredits,
-    number_of_images: calculatedImages,
-    credits_used: calculatedCreditsUsed
-  };
-
-  if (recordId) {
-    writeJson(
-      USAGE_KEY,
-      records.map((record) =>
-        record.id === recordId
-          ? {
-              ...record,
-              ...calculatedInput,
-              remaining_credits: remainingCredits,
-              updated_at: timestamp
-            }
-          : record
-      )
-    );
-    return;
-  }
-
-  const record: AiUsage = {
-    ...calculatedInput,
-    id: id("usage"),
-    remaining_credits: remainingCredits,
-    created_at: timestamp,
-    updated_at: timestamp,
-    profiles: null
-  };
-  writeJson(USAGE_KEY, [record, ...records]);
-}
-
-export async function deleteUsage(recordId: string) {
-  writeJson(
-    USAGE_KEY,
-    readJson<AiUsage[]>(USAGE_KEY, []).filter((record) => record.id !== recordId)
-  );
-}
-
-export async function getPayments(currentUser?: Profile) {
-  const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
-  const visible = currentUser?.role === "user" ? payments.filter((payment) => payment.user_id === currentUser.id) : payments;
-  return visible
-    .map((payment) =>
-      withProfile(
-        {
-          ...payment,
-          tax_amount: Number(payment.tax_amount || 0),
-          total_amount: Number(payment.total_amount || payment.amount || 0)
-        },
-        currentUser
-      )
-    )
-    .sort((a, b) => b.paid_at.localeCompare(a.paid_at));
-}
-
-export async function savePayment(input: PaymentInput, paymentId?: string) {
-  const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
-  const timestamp = now();
-  const duplicate = payments.find((payment) => {
-    if (payment.id === paymentId) return false;
-    const sameInvoice = normalizeKey(payment.invoice_number) === normalizeKey(input.invoice_number);
-    const samePayment = normalizeKey(payment.payment_id) === normalizeKey(input.payment_id);
-    const sameTransaction = normalizeKey(payment.transaction_id) === normalizeKey(input.transaction_id);
-    return sameInvoice || samePayment || sameTransaction;
-  });
-  if (duplicate) throw new Error("Invoice already uploaded. Credits were not added.");
-  const previousPayment = paymentId ? payments.find((payment) => payment.id === paymentId) : null;
-
-  if (paymentId) {
-    const previousCredits = Number(previousPayment?.credits || 0);
-    const nextCredits = Number(input.credits || 0);
-    const customerChanged =
-      previousPayment && normalizeKey(previousPayment.customer_email) !== normalizeKey(input.customer_email);
-    writeJson(
-      PAYMENTS_KEY,
-      payments.map((payment) =>
-        payment.id === paymentId
-          ? {
-              ...payment,
-              ...input,
-              updated_at: timestamp
-            }
-          : payment
-      )
-    );
-    if (customerChanged && previousPayment) {
-      updateCredits(previousPayment.customer_email, -previousCredits);
-      const totalCredits = updateCredits(input.customer_email, nextCredits);
-      appendCreditLedger({
-        customer_email: input.customer_email,
-        payment_id: input.payment_id,
-        invoice_number: input.invoice_number,
-        credits_added: nextCredits,
-        total_credits: totalCredits,
-        created_at: timestamp
-      });
-    } else {
-      const delta = nextCredits - previousCredits;
-      const totalCredits = updateCredits(input.customer_email, delta);
-      if (delta !== 0) {
-        appendCreditLedger({
-          customer_email: input.customer_email,
-          payment_id: input.payment_id,
-          invoice_number: input.invoice_number,
-          credits_added: delta,
-          total_credits: totalCredits,
-          created_at: timestamp
-        });
-      }
-    }
-    window.dispatchEvent(new Event("credits-updated"));
-    return;
-  }
-
-  const payment: Payment = {
-    ...input,
-    id: id("payment"),
-    created_at: timestamp,
-    updated_at: timestamp,
-    profiles: null
-  };
-  writeJson(PAYMENTS_KEY, [payment, ...payments]);
-  const totalCredits = updateCredits(input.customer_email, Number(input.credits || 0));
-  appendCreditLedger({
-    customer_email: input.customer_email,
-    payment_id: input.payment_id,
-    invoice_number: input.invoice_number,
-    credits_added: Number(input.credits || 0),
-    total_credits: totalCredits,
-    created_at: timestamp
-  });
-  window.dispatchEvent(new Event("credits-updated"));
-}
-
-export async function deletePayment(paymentId: string) {
-  const payments = readJson<Payment[]>(PAYMENTS_KEY, []);
-  const payment = payments.find((item) => item.id === paymentId);
-  if (payment) updateCredits(payment.customer_email, -Number(payment.credits || 0));
-  writeJson(
-    PAYMENTS_KEY,
-    payments.filter((payment) => payment.id !== paymentId)
-  );
-}
-
-export async function getUserCredits(email: string) {
-  return readJson<Record<string, number>>(USER_CREDITS_KEY, {})[email.toLowerCase()] ?? 0;
-}
-
-function updateCredits(email: string, delta: number) {
-  const key = email.toLowerCase();
-  const credits = readJson<Record<string, number>>(USER_CREDITS_KEY, {});
-  const total = Math.max(0, Number(credits[key] || 0) + delta);
-  writeJson(USER_CREDITS_KEY, {
-    ...credits,
-    [key]: total
-  });
-  return total;
-}
-
-function appendCreditLedger(entry: Omit<CreditLedgerEntry, "id">) {
-  const ledger = readJson<CreditLedgerEntry[]>(CREDIT_LEDGER_KEY, []);
-  writeJson(CREDIT_LEDGER_KEY, [{ ...entry, id: id("ledger") }, ...ledger]);
-}
-
-export async function getCreditLedger(email?: string) {
-  const ledger = readJson<CreditLedgerEntry[]>(CREDIT_LEDGER_KEY, []);
-  const normalizedEmail = email?.toLowerCase();
-  return (normalizedEmail ? ledger.filter((entry) => entry.customer_email.toLowerCase() === normalizedEmail) : ledger).sort(
-    (a, b) => b.created_at.localeCompare(a.created_at)
-  );
+function isAdminRole(role?: string | null) {
+  return role === "super_admin" || role === "admin" || role === "manager";
 }
 
 function normalizeKey(value: string) {
   return value.trim().toLowerCase();
 }
 
-function normalizePlatformLabel(value: string) {
-  return value.toLowerCase() === legacyPlatformKey() ? "Magnific" : value;
+function makeToolId(name: string) {
+  const base = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base || crypto.randomUUID();
+}
+
+function normalizePlatformLabel<T extends string>(value: T) {
+  return value.toLowerCase() === legacyPlatformKey() ? "Magnific" as T : value;
 }
 
 function normalizeUsageCategory(value: string | null | undefined) {
@@ -471,197 +64,313 @@ function normalizeSupplier(value: string | null | undefined) {
     : "Syad";
 }
 
+function legacyPlatformKey() {
+  return ["fr", "eepik"].join("");
+}
+
+export async function getCurrentUser() {
+  return firebaseGetCurrentProfile();
+}
+
+export async function signIn(email: string, password: string, _remember = true) {
+  return firebaseSignIn(email, password, _remember);
+}
+
+export async function signUp(email: string, password: string, fullName: string) {
+  return firebaseSignUp(email, password, fullName);
+}
+
+export async function signInWithGoogle(_remember = true) {
+  return firebaseGoogleSignIn(_remember);
+}
+
+export async function simulatePasswordReset(email: string) {
+  return firebaseResetPassword(email);
+}
+
+export async function signOut() {
+  await firebaseLogout();
+}
+
+export function onAuthChange(callback: (profile: Profile | null) => void) {
+  return firebaseOnAuthChange(callback);
+}
+
+export async function getUsers() {
+  const currentUser = await getCurrentUser();
+  if (!currentUser) return [];
+  if (!isAdminRole(currentUser.role)) return [currentUser];
+  return firebaseGetUsers();
+}
+
+export async function updateUserRole(userId: string, role: UserRole) {
+  await firebaseUpdateUserRole(userId, role);
+}
+
+export async function setUserDisabled(userId: string, disabled: boolean) {
+  await firebaseSetUserDisabled(userId, disabled);
+}
+
 function normalizeUsageRecord(record: AiUsage): AiUsage {
   return {
     ...record,
-    platform: normalizePlatformLabel(record.platform) as AiUsage["platform"],
+    platform: normalizePlatformLabel(record.platform),
     category: normalizeUsageCategory(record.category),
     supplier_requirements: normalizeSupplier(record.supplier_requirements)
   };
 }
 
-function normalizePurchasePlatform(purchase: CreditPurchase): CreditPurchase {
-  return {
-    ...purchase,
-    platform: normalizePlatformLabel(purchase.platform) as CreditPurchase["platform"],
-  };
+export async function getUsage(currentUser: Profile) {
+  const query = ensureSupabase()
+    .from("ai_usage")
+    .select("*, profiles:user_id(email, full_name)")
+    .order("date", { ascending: false });
+  if (!isAdminRole(currentUser.role)) query.eq("user_id", currentUser.id);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []).map((row) => normalizeUsageRecord(row as AiUsage));
 }
 
-function normalizeAiToolName(tool: AiTool): AiTool {
-  const legacy = legacyPlatformKey();
-  const legacyTitle = `${legacy.charAt(0).toUpperCase()}${legacy.slice(1)}`;
-  const legacyAi = `${legacyTitle} AI`;
-  const replaceText = (value: string) =>
-    value
-      .replaceAll(legacyAi, "Magnific")
-      .replaceAll(legacyTitle, "Magnific")
-      .replaceAll(legacy, "magnific");
-  if (!JSON.stringify(tool).toLowerCase().includes(legacy)) return tool;
-  const legacyToolId = `${legacy}-ai`;
-  const legacyDomain = `${legacy}.com`;
-  return {
-    ...tool,
-    id: tool.id === legacyToolId ? "magnific" : tool.id,
-    name: replaceText(tool.name),
-    description: replaceText(tool.description),
-    long_description: replaceText(tool.long_description),
-    logo_url: replaceText(tool.logo_url),
-    monthly_pricing: replaceText(tool.monthly_pricing),
-    latest_update: replaceText(tool.latest_update),
-    features: tool.features.map(replaceText),
-    pricing_plans: tool.pricing_plans.map(replaceText),
-    pros: tool.pros.map(replaceText),
-    cons: tool.cons.map(replaceText),
-    use_cases: tool.use_cases.map(replaceText),
-    alternatives: tool.alternatives.map(replaceText),
-    website_url: tool.website_url.includes(legacyDomain) ? "https://magnific.ai/" : replaceText(tool.website_url),
-    pricing_url: tool.pricing_url.includes(legacyDomain) ? "https://magnific.ai/pricing" : replaceText(tool.pricing_url),
-    docs_url: tool.docs_url.includes(legacyDomain) ? "https://magnific.ai/" : replaceText(tool.docs_url),
-    api_url: replaceText(tool.api_url),
-    download_url: replaceText(tool.download_url)
+export async function saveUsage(input: AiUsageInput, recordId?: string) {
+  const client = ensureSupabase();
+  const numberOfStyles = Number(input.number_of_styles) || 0;
+  const calculatedImages = numberOfStyles * 6;
+  const calculatedCreditsUsed = calculatedImages * 150;
+  const { data: purchases, error: purchaseError } = await client
+    .from("credit_purchases")
+    .select("total_credits_purchased")
+    .eq("user_id", input.user_id)
+    .eq("platform", input.platform);
+  if (purchaseError) throw purchaseError;
+  const purchasedCredits = (purchases ?? []).reduce((sum, item) => sum + Number(item.total_credits_purchased || 0), 0);
+
+  let usageQuery = client
+    .from("ai_usage")
+    .select("credits_used")
+    .eq("user_id", input.user_id)
+    .eq("platform", input.platform);
+  if (recordId) usageQuery = usageQuery.neq("id", recordId);
+  const { data: usage, error: usageError } = await usageQuery;
+  if (usageError) throw usageError;
+  const previousUsage = (usage ?? []).reduce((sum, item) => sum + Number(item.credits_used || 0), 0);
+  const remainingCredits = purchasedCredits - previousUsage - calculatedCreditsUsed;
+  if (remainingCredits < 0) throw new Error("Insufficient Credits. Please purchase more credits.");
+
+  const payload = {
+    ...input,
+    category: normalizeUsageCategory(input.category),
+    supplier_requirements: normalizeSupplier(input.supplier_requirements),
+    buy_credits: purchasedCredits,
+    number_of_images: calculatedImages,
+    credits_used: calculatedCreditsUsed,
+    remaining_credits: remainingCredits,
+    updated_at: now()
   };
+
+  const { error } = recordId
+    ? await client.from("ai_usage").update(payload).eq("id", recordId)
+    : await client.from("ai_usage").insert(payload);
+  if (error) throw error;
 }
 
-function legacyPlatformKey() {
-  return ["fr", "eepik"].join("");
+export async function deleteUsage(recordId: string) {
+  const { error } = await ensureSupabase().from("ai_usage").delete().eq("id", recordId);
+  if (error) throw error;
 }
 
 export async function getPurchases(currentUser?: Profile) {
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
-  const visible = currentUser?.role === "user" ? purchases.filter((purchase) => purchase.user_id === currentUser.id) : purchases;
-  return visible
-    .map((purchase) =>
-      withProfile(
-        {
-          ...purchase,
-          invoice_name: purchase.invoice_name ?? purchase.invoice_number ?? "Imported invoice",
-          due_date: purchase.due_date ?? null,
-          subtotal: Number(purchase.subtotal || 0),
-          tax_amount: Number(purchase.tax_amount || 0),
-          discount_amount: Number(purchase.discount_amount || 0),
-          amount_paid: Number(purchase.amount_paid || purchase.purchase_amount || 0),
-          balance_due: Number(purchase.balance_due || 0),
-          payment_status: purchase.payment_status ?? "Unknown",
-          customer_name: purchase.customer_name ?? null,
-          billing_address: purchase.billing_address ?? null,
-          extracted_json: purchase.extracted_json ?? null,
-          ocr_text: purchase.ocr_text ?? null
-        },
-        currentUser
-      )
-    )
-    .sort((a, b) => b.purchase_date.localeCompare(a.purchase_date));
+  let query = ensureSupabase()
+    .from("credit_purchases")
+    .select("*, profiles:user_id(email, full_name)")
+    .order("purchase_date", { ascending: false });
+  if (currentUser && !isAdminRole(currentUser.role)) query = query.eq("user_id", currentUser.id);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    ...row,
+    platform: normalizePlatformLabel(row.platform),
+    invoice_name: row.invoice_name ?? row.invoice_number ?? "Imported invoice",
+    due_date: row.due_date ?? null,
+    subtotal: Number(row.subtotal || 0),
+    tax_amount: Number(row.tax_amount || 0),
+    discount_amount: Number(row.discount_amount || 0),
+    amount_paid: Number(row.amount_paid || row.purchase_amount || 0),
+    balance_due: Number(row.balance_due || 0),
+    payment_status: row.payment_status ?? "Unknown",
+    customer_name: row.customer_name ?? null,
+    billing_address: row.billing_address ?? null,
+    extracted_json: row.extracted_json ?? null,
+    ocr_text: row.ocr_text ?? null
+  })) as CreditPurchase[];
 }
 
 export async function savePurchase(input: CreditPurchaseInput, purchaseId?: string, options?: { allowDuplicateInvoice?: boolean }) {
-  const purchases = readJson<CreditPurchase[]>(PURCHASES_KEY, []).map(normalizePurchasePlatform);
-  const timestamp = now();
-  const duplicate = purchases.find((purchase) => purchase.id !== purchaseId && purchase.invoice_number.toLowerCase() === input.invoice_number.toLowerCase());
-  if (duplicate && !options?.allowDuplicateInvoice) throw new Error("Duplicate invoice uploaded. Please use a unique invoice number.");
-
-  if (purchaseId) {
-    writeJson(
-      PURCHASES_KEY,
-      purchases.map((purchase) =>
-        purchase.id === purchaseId
-          ? {
-              ...purchase,
-              ...input,
-              updated_at: timestamp
-            }
-          : purchase
-      )
-    );
-    return;
+  const client = ensureSupabase();
+  if (!options?.allowDuplicateInvoice && input.invoice_number) {
+    let duplicateQuery = client
+      .from("credit_purchases")
+      .select("id")
+      .eq("invoice_number", input.invoice_number)
+      .limit(1);
+    if (purchaseId) duplicateQuery = duplicateQuery.neq("id", purchaseId);
+    const { data, error } = await duplicateQuery;
+    if (error) throw error;
+    if (data?.length) throw new Error("Duplicate invoice uploaded. Please use a unique invoice number.");
   }
-
-  const purchase: CreditPurchase = {
-    ...input,
-    id: id("purchase"),
-    created_at: timestamp,
-    updated_at: timestamp,
-    profiles: null
-  };
-  writeJson(PURCHASES_KEY, [purchase, ...purchases]);
+  const payload = { ...input, updated_at: now() };
+  const { error } = purchaseId
+    ? await client.from("credit_purchases").update(payload).eq("id", purchaseId)
+    : await client.from("credit_purchases").insert(payload);
+  if (error) throw error;
 }
 
 export async function deletePurchase(purchaseId: string) {
-  writeJson(
-    PURCHASES_KEY,
-    readJson<CreditPurchase[]>(PURCHASES_KEY, []).filter((purchase) => purchase.id !== purchaseId)
-  );
+  const { error } = await ensureSupabase().from("credit_purchases").delete().eq("id", purchaseId);
+  if (error) throw error;
+}
+
+export async function getPayments(currentUser?: Profile) {
+  let query = ensureSupabase()
+    .from("payments")
+    .select("*, profiles:user_id(email, full_name)")
+    .order("paid_at", { ascending: false });
+  if (currentUser && !isAdminRole(currentUser.role)) query = query.eq("user_id", currentUser.id);
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []).map((payment) => ({
+    ...payment,
+    tax_amount: Number(payment.tax_amount || 0),
+    total_amount: Number(payment.total_amount || payment.amount || 0)
+  })) as Payment[];
+}
+
+export async function savePayment(input: PaymentInput, paymentId?: string) {
+  const client = ensureSupabase();
+  const { data: duplicate, error: duplicateError } = await client
+    .from("payments")
+    .select("id")
+    .or(`invoice_number.eq.${input.invoice_number},payment_id.eq.${input.payment_id},transaction_id.eq.${input.transaction_id}`)
+    .neq("id", paymentId ?? "00000000-0000-0000-0000-000000000000")
+    .limit(1);
+  if (duplicateError) throw duplicateError;
+  if (duplicate?.length) throw new Error("Invoice already uploaded. Credits were not added.");
+
+  const previous = paymentId ? (await client.from("payments").select("*").eq("id", paymentId).maybeSingle()).data as Payment | null : null;
+  const { error } = paymentId
+    ? await client.from("payments").update({ ...input, updated_at: now() }).eq("id", paymentId)
+    : await client.from("payments").insert(input);
+  if (error) throw error;
+
+  const delta = Number(input.credits || 0) - Number(previous?.credits || 0);
+  if (delta !== 0 || !paymentId) await addCredits(input.customer_email, delta, input.payment_id, input.invoice_number);
+  window.dispatchEvent(new Event("credits-updated"));
+}
+
+export async function deletePayment(paymentId: string) {
+  const client = ensureSupabase();
+  const { data: payment, error: readError } = await client.from("payments").select("*").eq("id", paymentId).maybeSingle();
+  if (readError) throw readError;
+  const { error } = await client.from("payments").delete().eq("id", paymentId);
+  if (error) throw error;
+  if (payment) await addCredits(payment.customer_email, -Number(payment.credits || 0), payment.payment_id, payment.invoice_number);
+}
+
+async function addCredits(email: string, delta: number, paymentId: string, invoiceNumber: string) {
+  const client = ensureSupabase();
+  const normalizedEmail = email.toLowerCase();
+  const { data: profile, error: readError } = await client
+    .from("profiles")
+    .select("id, credits")
+    .eq("email", normalizedEmail)
+    .maybeSingle();
+  if (readError) throw readError;
+  const total = Math.max(0, Number(profile?.credits || 0) + delta);
+  if (profile) {
+    const { error } = await client.from("profiles").update({ credits: total, updated_at: now() }).eq("id", profile.id);
+    if (error) throw error;
+  }
+  const { error: ledgerError } = await client.from("credit_ledger").insert({
+    customer_email: normalizedEmail,
+    payment_id: paymentId,
+    invoice_number: invoiceNumber,
+    credits_added: delta,
+    total_credits: total
+  });
+  if (ledgerError) throw ledgerError;
+}
+
+export async function getUserCredits(email: string) {
+  const { data, error } = await ensureSupabase()
+    .from("profiles")
+    .select("credits")
+    .eq("email", email.toLowerCase())
+    .maybeSingle();
+  if (error) throw error;
+  return Number(data?.credits || 0);
+}
+
+export async function getCreditLedger(email?: string) {
+  let query = ensureSupabase()
+    .from("credit_ledger")
+    .select("*")
+    .order("created_at", { ascending: false });
+  if (email) query = query.eq("customer_email", email.toLowerCase());
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []) as CreditLedgerEntry[];
 }
 
 export async function getUsageCategories() {
-  writeJson(USAGE_CATEGORIES_KEY, [...USAGE_CATEGORIES]);
   return [...USAGE_CATEGORIES];
 }
 
-export async function saveUsageCategory(category: string) {
-  const value = category.trim();
-  if (!USAGE_CATEGORIES.includes(value as (typeof USAGE_CATEGORIES)[number])) return;
-  const categories = readJson<string[]>(USAGE_CATEGORIES_KEY, []);
-  if (!categories.some((item) => item.toLowerCase() === value.toLowerCase())) {
-    writeJson(USAGE_CATEGORIES_KEY, [...categories, value].sort((a, b) => a.localeCompare(b)));
-  }
+export async function saveUsageCategory(_category: string) {
+  return;
 }
 
 export async function getAiTools() {
-  const saved = readJson<AiTool[] | null>(AI_TOOLS_KEY, null);
-  if (saved?.length) {
-    const validCategories = new Set<string>(AI_TOOL_CATEGORIES);
-    const needsReset = saved.some((tool) => !validCategories.has(tool.category) || typeof tool.active !== "boolean");
-    const migrated = saved.map((tool) => {
-      const logo = AI_TOOL_LOGOS[tool.id];
-      const normalizedTool = normalizeAiToolName(tool);
-      return logo ? { ...normalizedTool, logo_url: logo } : normalizedTool;
-    });
-    const changed = migrated.some((tool, index) => JSON.stringify(tool) !== JSON.stringify(saved[index]));
-    if (changed) writeJson(AI_TOOLS_KEY, migrated);
-    if (!needsReset) return migrated;
-  }
-  writeJson(AI_TOOLS_KEY, DEFAULT_AI_TOOLS);
-  return DEFAULT_AI_TOOLS;
+  const { data, error } = await ensureSupabase()
+    .from("ai_tools")
+    .select("*")
+    .order("popularity", { ascending: false });
+  if (error) throw error;
+  return (data ?? []) as AiTool[];
 }
 
 export async function saveAiTool(input: AiToolInput, toolId?: string) {
-  const tools = await getAiTools();
-  const timestamp = now();
-
-  if (toolId) {
-    writeJson(
-      AI_TOOLS_KEY,
-      tools.map((tool) =>
-        tool.id === toolId
-          ? {
-              ...tool,
-              ...input,
-              updated_at: timestamp
-            }
-          : tool
-      )
-    );
-    return;
-  }
-
-  const slug = input.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-  const record: AiTool = {
-    ...input,
-    id: `${slug || "tool"}_${crypto.randomUUID?.() ?? Date.now()}`,
-    created_at: timestamp,
-    updated_at: timestamp
-  };
-  writeJson(AI_TOOLS_KEY, [record, ...tools]);
+  const payload = { ...input, updated_at: now() };
+  const { error } = toolId
+    ? await ensureSupabase().from("ai_tools").update(payload).eq("id", toolId)
+    : await ensureSupabase().from("ai_tools").insert({ id: makeToolId(input.name), ...payload });
+  if (error) throw error;
 }
 
 export async function deleteAiTool(toolId: string) {
-  writeJson(
-    AI_TOOLS_KEY,
-    (await getAiTools()).filter((tool) => tool.id !== toolId)
-  );
+  const { error } = await ensureSupabase().from("ai_tools").delete().eq("id", toolId);
+  if (error) throw error;
 }
 
 export async function resetAiTools() {
-  writeJson(AI_TOOLS_KEY, DEFAULT_AI_TOOLS);
-  return DEFAULT_AI_TOOLS;
+  const client = ensureSupabase();
+  const { error: deleteError } = await client.from("ai_tools").delete().neq("id", "");
+  if (deleteError) throw deleteError;
+  const { error } = await client.from("ai_tools").insert(DEFAULT_AI_TOOLS);
+  if (error) throw error;
+  return getAiTools();
+}
+
+export function subscribeToBusinessChanges(callback: () => void) {
+  if (!supabase) return () => undefined;
+  const client = supabase;
+  const channel = client
+    .channel("business-data")
+    .on("postgres_changes", { event: "*", schema: "public", table: "ai_usage" }, callback)
+    .on("postgres_changes", { event: "*", schema: "public", table: "credit_purchases" }, callback)
+    .on("postgres_changes", { event: "*", schema: "public", table: "payments" }, callback)
+    .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, callback)
+    .on("postgres_changes", { event: "*", schema: "public", table: "ai_tools" }, callback)
+    .subscribe();
+  return () => {
+    client.removeChannel(channel);
+  };
 }

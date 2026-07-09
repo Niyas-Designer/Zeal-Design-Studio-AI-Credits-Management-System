@@ -1,6 +1,6 @@
 import type { PLATFORMS } from "@/lib/constants";
 
-export type UserRole = "admin" | "user";
+export type UserRole = "super_admin" | "admin" | "manager" | "employee" | "customer" | "user";
 export type Platform = (typeof PLATFORMS)[number];
 export type InvoiceFile = {
   name: string;

@@ -3,7 +3,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { ExternalLink, Info, Pencil, Plus, RotateCcw, Search, Sparkles, Star, Trash2 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { AI_TOOL_CATEGORIES } from "@/lib/ai-tools";
-import { deleteAiTool, getAiTools, resetAiTools, saveAiTool } from "@/lib/data-store";
+import { deleteAiTool, getAiTools, resetAiTools, saveAiTool, subscribeToBusinessChanges } from "@/lib/data-store";
 import type { AiTool, AiToolCategory, AiToolInput, AiToolPricingType, AiToolUpdateStatus, Profile } from "@/lib/types";
 import { aiToolSchema, type AiToolFormValues } from "@/lib/validation";
 import { Button } from "@/components/ui/button";
@@ -35,7 +35,7 @@ export function AiStudioPage({ profile }: { profile: Profile }) {
   const [selectedTool, setSelectedTool] = useState<AiTool | null>(null);
   const [editingTool, setEditingTool] = useState<AiTool | null>(null);
   const [formOpen, setFormOpen] = useState(false);
-  const admin = profile.role === "admin";
+  const admin = profile.role === "super_admin" || profile.role === "admin" || profile.role === "manager";
 
   async function refresh() {
     try {
@@ -47,6 +47,7 @@ export function AiStudioPage({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     refresh();
+    return subscribeToBusinessChanges(refresh);
   }, []);
 
   const filtered = useMemo(() => {

@@ -71,6 +71,7 @@ import {
   signInWithGoogle,
   signOut,
   signUp,
+  subscribeToBusinessChanges,
   updateUserRole
 } from "@/lib/data-store";
 import { PLATFORMS, SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
@@ -95,6 +96,10 @@ type PurchaseDuplicateState = {
   existing: CreditPurchase;
   input: Parameters<typeof savePurchase>[0];
 } | null;
+
+function isAdminRole(role: Profile["role"]) {
+  return role === "super_admin" || role === "admin" || role === "manager";
+}
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -190,7 +195,7 @@ function AppInner() {
     return <AuthScreen onSignedIn={setProfile} />;
   }
 
-  const admin = profile.role === "admin";
+  const admin = isAdminRole(profile.role);
 
   return (
     <div className="min-h-screen bg-background">
@@ -795,7 +800,7 @@ function DashboardPage({ profile }: { profile: Profile }) {
           getUsage(profile),
           getPurchases(profile),
           getPayments(profile),
-          getCreditLedger(profile.role === "admin" ? undefined : profile.email),
+          getCreditLedger(isAdminRole(profile.role) ? undefined : profile.email),
           getUserCredits(profile.email)
         ]);
         setRecords(nextUsage);
@@ -809,7 +814,11 @@ function DashboardPage({ profile }: { profile: Profile }) {
     };
     refreshDashboard();
     window.addEventListener("credits-updated", refreshDashboard);
-    return () => window.removeEventListener("credits-updated", refreshDashboard);
+    const unsubscribeBusiness = subscribeToBusinessChanges(refreshDashboard);
+    return () => {
+      window.removeEventListener("credits-updated", refreshDashboard);
+      unsubscribeBusiness();
+    };
   }, [profile]);
 
   const stats = getDashboardStats(records, purchases);
@@ -907,6 +916,7 @@ function PurchaseCreditsPage({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     refresh();
+    return subscribeToBusinessChanges(refresh);
   }, [profile]);
 
   const purchaseUsage = useMemo(() => allocatePurchaseUsage(purchases, usage), [purchases, usage]);
@@ -1861,6 +1871,7 @@ function UsagePage({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     refresh();
+    return subscribeToBusinessChanges(refresh);
   }, [profile]);
 
   const filtered = records.filter((record) =>
@@ -2125,6 +2136,10 @@ function ReportsPage({ profile }: { profile: Profile }) {
   useEffect(() => {
     loadUsage(profile, setRecords);
     getPurchases(profile).then(setPurchases).catch(console.error);
+    return subscribeToBusinessChanges(() => {
+      loadUsage(profile, setRecords);
+      getPurchases(profile).then(setPurchases).catch(console.error);
+    });
   }, [profile]);
   return (
     <>
@@ -2147,7 +2162,7 @@ function PaymentsPage({ profile }: { profile: Profile }) {
     try {
       const [nextPayments, nextLedger] = await Promise.all([
         getPayments(profile),
-        getCreditLedger(profile.role === "admin" ? undefined : profile.email)
+        getCreditLedger(isAdminRole(profile.role) ? undefined : profile.email)
       ]);
       setPayments(nextPayments);
       setLedger(nextLedger);
@@ -2158,6 +2173,7 @@ function PaymentsPage({ profile }: { profile: Profile }) {
 
   useEffect(() => {
     refresh();
+    return subscribeToBusinessChanges(refresh);
   }, [profile]);
 
   const filtered = payments.filter((payment) =>
@@ -2183,7 +2199,7 @@ function PaymentsPage({ profile }: { profile: Profile }) {
     <>
       <PageHeader
         title="Payments"
-        description={profile.role === "admin" ? "Upload invoices and add AI credits without accounting clutter." : "View your payment history."}
+        description={isAdminRole(profile.role) ? "Upload invoices and add AI credits without accounting clutter." : "View your payment history."}
         action={<div className="flex gap-2"><Button variant="outline" onClick={exportPayments}>Export</Button><Button onClick={() => { setEditing(null); setOpen(true); }}><Plus className="h-4 w-4" />New Credit Purchase</Button></div>}
       />
       <Card className="mb-4">
@@ -2209,7 +2225,7 @@ function PaymentsPage({ profile }: { profile: Profile }) {
           ) : payment.invoice_number,
           <div className="flex gap-2" key={payment.id}>
             <Button variant="outline" size="sm" onClick={() => { setEditing(payment); setOpen(true); }}>View/Edit</Button>
-            {profile.role === "admin" ? <Button variant="destructive" size="sm" onClick={async () => { await deletePayment(payment.id); refresh(); }}>Delete</Button> : null}
+            {isAdminRole(profile.role) ? <Button variant="destructive" size="sm" onClick={async () => { await deletePayment(payment.id); refresh(); }}>Delete</Button> : null}
           </div>
         ])}
       />
@@ -2433,7 +2449,7 @@ function UsersPage({ currentUser }: { currentUser: Profile }) {
     refresh();
   }, []);
 
-  async function updateRole(user: Profile, role: "admin" | "user") {
+  async function updateRole(user: Profile, role: Profile["role"]) {
     try {
       await updateUserRole(user.id, role);
       refresh();
@@ -2460,9 +2476,15 @@ function UsersPage({ currentUser }: { currentUser: Profile }) {
         rows={users.map((user) => [
           user.full_name,
           user.email,
-          <Select key={`${user.id}-role`} value={user.role} onValueChange={(role) => updateRole(user, role as "admin" | "user")} disabled={user.id === currentUser.id}>
-            <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-            <SelectContent><SelectItem value="user">User</SelectItem><SelectItem value="admin">Admin</SelectItem></SelectContent>
+          <Select key={`${user.id}-role`} value={user.role} onValueChange={(role) => updateRole(user, role as Profile["role"])} disabled={user.id === currentUser.id}>
+            <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="super_admin">Super Admin</SelectItem>
+              <SelectItem value="admin">Admin</SelectItem>
+              <SelectItem value="manager">Manager</SelectItem>
+              <SelectItem value="employee">Employee</SelectItem>
+              <SelectItem value="customer">Customer</SelectItem>
+            </SelectContent>
           </Select>,
           user.disabled ? "Disabled" : "Active",
           formatDate(user.created_at),
