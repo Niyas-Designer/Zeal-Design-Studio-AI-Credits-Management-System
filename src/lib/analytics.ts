@@ -3,6 +3,8 @@ import type { AiUsage, CreditPurchase } from "@/lib/types";
 import { PLATFORMS } from "@/lib/constants";
 import { toNumber } from "@/lib/utils";
 
+const CREDITS_PER_IMAGE = 150;
+
 export function getDashboardStats(records: AiUsage[], purchases: CreditPurchase[] = []) {
   const now = new Date();
   const currentMonthRecords = records.filter((record) =>
@@ -15,9 +17,10 @@ export function getDashboardStats(records: AiUsage[], purchases: CreditPurchase[
       acc.creditsUsed += toNumber(record.credits_used);
       acc.styles += toNumber(record.number_of_styles);
       acc.images += toNumber(record.number_of_images);
+      acc.wastage += toNumber(record.wastage);
       return acc;
     },
-    { buyCredits: 0, creditsUsed: 0, styles: 0, images: 0 }
+    { buyCredits: 0, creditsUsed: 0, styles: 0, images: 0, wastage: 0 }
   );
 
   const monthly = currentMonthRecords.reduce(
@@ -40,6 +43,9 @@ export function getDashboardStats(records: AiUsage[], purchases: CreditPurchase[
     usagePercentage,
     totalStyles: totals.styles,
     totalImages: totals.images,
+    totalWastage: totals.wastage,
+    totalWastageCredits: totals.wastage * CREDITS_PER_IMAGE,
+    wastagePerEntry: records.length ? totals.wastage / records.length : 0,
     totalEntries: records.length,
     monthlyUsage: monthly.creditsUsed,
     currentMonthBalance: monthly.buyCredits - monthly.creditsUsed,
@@ -58,6 +64,7 @@ export function getMonthlySeries(records: AiUsage[]) {
       creditsPurchased: number;
       images: number;
       styles: number;
+      wastage: number;
     }
   >();
 
@@ -66,11 +73,12 @@ export function getMonthlySeries(records: AiUsage[]) {
     const label = format(parseISO(record.date), "MMM yyyy");
     const current =
       map.get(key) ??
-      { month: label, creditsUsed: 0, creditsPurchased: 0, images: 0, styles: 0 };
+      { month: label, creditsUsed: 0, creditsPurchased: 0, images: 0, styles: 0, wastage: 0 };
     current.creditsUsed += toNumber(record.credits_used);
     current.creditsPurchased += toNumber(record.buy_credits);
     current.images += toNumber(record.number_of_images);
     current.styles += toNumber(record.number_of_styles);
+    current.wastage += toNumber(record.wastage);
     map.set(key, current);
   });
 
@@ -97,18 +105,23 @@ export function getPlatformSeries(records: AiUsage[]) {
         (sum, record) => sum + toNumber(record.number_of_styles),
         0
       ),
+      wastage: platformRecords.reduce(
+        (sum, record) => sum + toNumber(record.wastage),
+        0
+      ),
       entries: platformRecords.length
     };
   }).filter((item) => item.entries > 0);
 }
 
 export function getCategorySeries(records: AiUsage[]) {
-  const map = new Map<string, { category: string; styles: number; images: number; creditsUsed: number; entries: number }>();
+  const map = new Map<string, { category: string; styles: number; images: number; wastage: number; creditsUsed: number; entries: number }>();
   records.forEach((record) => {
     const category = record.category || "Custom";
-    const current = map.get(category) ?? { category, styles: 0, images: 0, creditsUsed: 0, entries: 0 };
+    const current = map.get(category) ?? { category, styles: 0, images: 0, wastage: 0, creditsUsed: 0, entries: 0 };
     current.styles += toNumber(record.number_of_styles);
     current.images += toNumber(record.number_of_images);
+    current.wastage += toNumber(record.wastage);
     current.creditsUsed += toNumber(record.credits_used);
     current.entries += 1;
     map.set(category, current);
@@ -131,12 +144,13 @@ export function getPurchaseSeries(purchases: CreditPurchase[]) {
 }
 
 export function getSupplierUsage(records: AiUsage[]) {
-  const map = new Map<string, { supplier: string; styles: number; images: number; creditsUsed: number; entries: number }>();
+  const map = new Map<string, { supplier: string; styles: number; images: number; wastage: number; creditsUsed: number; entries: number }>();
   records.forEach((record) => {
     const supplier = record.supplier_requirements || "Unassigned";
-    const current = map.get(supplier) ?? { supplier, styles: 0, images: 0, creditsUsed: 0, entries: 0 };
+    const current = map.get(supplier) ?? { supplier, styles: 0, images: 0, wastage: 0, creditsUsed: 0, entries: 0 };
     current.styles += toNumber(record.number_of_styles);
     current.images += toNumber(record.number_of_images);
+    current.wastage += toNumber(record.wastage);
     current.creditsUsed += toNumber(record.credits_used);
     current.entries += 1;
     map.set(supplier, current);
@@ -171,6 +185,19 @@ export function getSupplierSummary(records: AiUsage[]) {
       platform: record.platform,
       supplier: record.supplier_requirements ?? "",
       description: record.description,
+      wastage: toNumber(record.wastage),
       creditsUsed: toNumber(record.credits_used)
     }));
+}
+
+export function getWastageSummary(records: AiUsage[]) {
+  const map = new Map<string, { label: string; wastage: number; entries: number }>();
+  records.forEach((record) => {
+    const label = record.category || "Custom";
+    const current = map.get(label) ?? { label, wastage: 0, entries: 0 };
+    current.wastage += toNumber(record.wastage);
+    current.entries += 1;
+    map.set(label, current);
+  });
+  return Array.from(map.values()).sort((a, b) => b.wastage - a.wastage);
 }

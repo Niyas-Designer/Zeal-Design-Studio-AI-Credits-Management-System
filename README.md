@@ -1,62 +1,42 @@
 # Zeal Design Studio AI Credits Management System
 
-Production-ready React + Vite dashboard for AI credit purchases, invoice tracking, usage analytics, reports, payments, AI Studio, and role-based operations.
+Offline-only React + Vite dashboard for AI credit purchases, invoice tracking, usage analytics, reports, payments, AI Studio, and local admin operations.
 
-Production backend responsibilities:
+This version is frontend-only and runs on localhost. It has no backend SDKs, server functions, remote database, remote storage, or backend environment variables.
 
-- Firebase Authentication for login, signup, Google sign-in, sessions, password reset, and logout.
-- Firestore `users` collection for auth user profile documents.
-- Supabase PostgreSQL for all business data.
-- Supabase Row Level Security for authorization.
-- Supabase Realtime for admin-to-user updates.
-- Supabase Storage for invoices, documents, and images.
+## Local Login
 
-Business data must not be stored in `localStorage`.
+- Local admin email: `niyas.zealdesigner@gmail.com`
+- Predefined password: `@arddesign6Z`
+- Session key: `zeal_offline_authenticated`
+- Local database key: `zeal_offline_local_database_v1`
+- One local password only. There are no account creation or remote identity flows.
+
+The session remains active in `localStorage` until Logout is clicked.
+
+## Local Data
+
+All business data is saved in browser `localStorage`:
+
+- AI usage
+- Credit purchases
+- Payments
+- Credit ledger
+- Reports data
+- Invoice file metadata/data URLs
+- AI Studio catalog changes
+- Local user profile and preferences
+
+The local store is loaded automatically at startup, saved after each change, and reset safely if corrupted JSON is detected.
 
 ## Setup
 
-1. Create or open the Supabase project.
-2. Run the migration:
+```bash
+npm install
+npm run dev
+```
 
-   ```bash
-   supabase db push
-   ```
-
-   Or paste `supabase/migrations/202607090001_production_schema.sql` into the Supabase SQL editor.
-
-3. Copy `.env.example` to `.env.local` and add Firebase + Supabase values:
-
-   ```bash
-   VITE_FIREBASE_API_KEY=your-firebase-api-key
-   VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
-   VITE_FIREBASE_PROJECT_ID=your-project-id
-   VITE_FIREBASE_STORAGE_BUCKET=your-project.firebasestorage.app
-   VITE_FIREBASE_MESSAGING_SENDER_ID=your-sender-id
-   VITE_FIREBASE_APP_ID=your-firebase-app-id
-   VITE_FIREBASE_MEASUREMENT_ID=your-measurement-id
-   VITE_SUPABASE_URL=https://your-project.supabase.co
-   VITE_SUPABASE_PUBLISHABLE_KEY=your-publishable-or-anon-key
-   ```
-
-4. Install and run:
-
-   ```bash
-   npm install
-   npm run dev
-   ```
-
-5. Open `http://localhost:3000`.
-
-## Firebase Authentication
-
-In Firebase Console:
-
-- Enable Email/Password authentication.
-- Enable Google authentication.
-- Add local and production domains to Authorized domains.
-- Enable Firestore and create security rules for the `users` collection.
-
-The first configured owner email is stored as `super_admin` in Firestore during profile creation.
+Open `http://localhost:3000`.
 
 ## Commands
 
@@ -66,25 +46,10 @@ npm run build
 npm run dev
 ```
 
-## Production Notes
+## Offline Notes
 
-- Set Vercel Node.js to 22 because `pdfjs-dist` requires Node `>=22.13.0`.
-- Add Firebase `VITE_FIREBASE_*` variables and Supabase `VITE_SUPABASE_*` variables to Vercel.
-- Never expose the Supabase secret/service-role key in the Vite app.
-- Configure Firebase authorized domains for local and production domains.
-- Verify RLS and realtime before launch.
-
-## Architecture
-
-See [docs/production-supabase-architecture.md](docs/production-supabase-architecture.md) for:
-
-- Architecture diagram
-- ER diagram
-- SQL migration details
-- RLS policy summary
-- Storage setup
-- Realtime setup
-- Security checklist
-- Performance checklist
-- Deployment checklist
-- Final test report
+- Build artifacts are static frontend files.
+- No backend `.env` file is required.
+- Exports run entirely in the browser.
+- PDF invoice parsing and OCR use bundled/local worker assets.
+- External links in AI Studio are informational and only open if the user clicks them.

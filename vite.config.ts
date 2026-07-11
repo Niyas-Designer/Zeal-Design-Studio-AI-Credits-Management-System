@@ -16,8 +16,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("node_modules/@supabase")) return "supabase";
-          if (id.includes("node_modules/firebase") || id.includes("node_modules/@firebase")) return "firebase";
           if (id.includes("node_modules/recharts")) return "charts";
           if (id.includes("node_modules/jspdf") || id.includes("node_modules/jspdf-autotable")) return "reports";
           if (id.includes("node_modules/pdfjs-dist") || id.includes("node_modules/tesseract.js") || id.includes("node_modules/@tesseract.js-data")) return "invoice-extraction";

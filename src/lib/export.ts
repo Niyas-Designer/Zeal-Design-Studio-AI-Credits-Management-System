@@ -7,6 +7,8 @@ import { getCategorySeries, getDashboardStats } from "@/lib/analytics";
 import { PLATFORMS } from "@/lib/constants";
 import type { AiUsage, CreditPurchase } from "@/lib/types";
 
+const CREDITS_PER_IMAGE = 150;
+
 const columns = [
   "Date",
   "Platform",
@@ -16,6 +18,8 @@ const columns = [
   "Remaining",
   "Styles",
   "Images",
+  "Wastage",
+  "Wastage Credits",
   "Description",
   "Supplier",
   "Created By"
@@ -31,6 +35,8 @@ function rows(records: AiUsage[]) {
     record.remaining_credits,
     record.number_of_styles,
     record.number_of_images,
+    record.wastage,
+    Number(record.wastage || 0) * CREDITS_PER_IMAGE,
     record.description,
     record.supplier_requirements ?? "",
     record.profiles?.full_name || record.profiles?.email || record.user_id
@@ -76,11 +82,11 @@ export function exportPdf(records: AiUsage[], title = "Zeal AI Usage Report", pu
   doc.setTextColor(0, 0, 0);
   doc.setFontSize(9);
   doc.text(`Generated ${format(new Date(), "PPpp")}`, 14, 29);
-  doc.text(`Purchased: ${stats.totalBuyCredits}   Used: ${stats.totalCreditsUsed}   Remaining: ${stats.remainingCredits}   Purchases: ${stats.totalPurchases}`, 14, 35);
+  doc.text(`Purchased: ${stats.totalBuyCredits}   Used: ${stats.totalCreditsUsed}   Remaining: ${stats.remainingCredits}   Wastage Credits: ${stats.totalWastageCredits}   Purchases: ${stats.totalPurchases}`, 14, 35);
   autoTable(doc, {
     startY: 42,
-    head: [["Category", "Styles", "Images", "Credits Used"]],
-    body: getCategorySeries(records).map((item) => [item.category, item.styles, item.images, item.creditsUsed]),
+    head: [["Category", "Styles", "Images", "Wastage", "Wastage Credits", "Credits Used"]],
+    body: getCategorySeries(records).map((item) => [item.category, item.styles, item.images, item.wastage, item.wastage * CREDITS_PER_IMAGE, item.creditsUsed]),
     styles: { fontSize: 8, cellPadding: 2 },
     headStyles: { fillColor: [17, 17, 17] }
   });
@@ -156,6 +162,7 @@ function buildMonthlyPurchasePdf(records: AiUsage[], purchases: CreditPurchase[]
       ["Total Purchases", totals.totalPurchases, "Number of Purchases", totals.totalPurchases],
       ["Total Amount Spent", totals.amountPaid, "Total Credits Purchased", totals.creditsPurchased],
       ["Total Credits Used", totals.creditsUsed, "Remaining Credits", totals.remainingCredits],
+      ["Wastage Images", totals.totalWastage, "Wastage Credits", totals.totalWastageCredits],
       ["Total Amount Paid", totals.amountPaid, "", ""]
     ],
     styles: { fontSize: 9, cellPadding: 3 },
@@ -251,6 +258,8 @@ function getMonthlyPurchaseTotals(records: AiUsage[], purchases: CreditPurchase[
     amountPaid,
     creditsPurchased,
     creditsUsed,
+    totalWastage: records.reduce((sum, record) => sum + Number(record.wastage || 0), 0),
+    totalWastageCredits: records.reduce((sum, record) => sum + Number(record.wastage || 0), 0) * CREDITS_PER_IMAGE,
     remainingCredits: creditsPurchased - Array.from(allocation.values()).reduce((sum, used) => sum + used, 0)
   };
 }

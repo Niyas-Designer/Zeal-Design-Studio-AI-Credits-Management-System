@@ -14,6 +14,7 @@ export const aiUsageSchema = z
     description: z.string().trim().min(3, "Description is required"),
     number_of_styles: z.coerce.number().int().min(0, "Styles cannot be negative"),
     number_of_images: z.coerce.number().int().min(0, "Images cannot be negative"),
+    wastage: nonNegative,
     credits_used: nonNegative,
     supplier_requirements: z.enum(SUPPLIERS, { required_error: "Supplier is required" })
   })
@@ -25,31 +26,8 @@ export const aiUsageSchema = z
 export type AiUsageFormValues = z.infer<typeof aiUsageSchema>;
 
 export const loginSchema = z.object({
-  email: z.string().email("Enter a valid email"),
-  password: z.string().min(6, "Password must be at least 6 characters")
+  password: z.string().min(1, "Password is required")
 });
-
-export const forgotPasswordSchema = z.object({
-  email: z.string().email("Enter a valid email")
-});
-
-export const signupSchema = z
-  .object({
-    full_name: z.string().trim().min(2, "Full name is required"),
-    email: z.string().email("Enter a valid email"),
-    password: z
-      .string()
-      .min(8, "Password must be at least 8 characters")
-      .regex(/[A-Z]/, "Password must include an uppercase letter")
-      .regex(/[a-z]/, "Password must include a lowercase letter")
-      .regex(/[0-9]/, "Password must include a number")
-      .regex(/[^A-Za-z0-9]/, "Password must include a symbol"),
-    confirm_password: z.string().min(8, "Confirm your password")
-  })
-  .refine((data) => data.password === data.confirm_password, {
-    message: "Passwords do not match",
-    path: ["confirm_password"]
-  });
 
 export const paymentSchema = z.object({
   customer_name: z.string().trim().min(2, "Purchased by is required"),

@@ -13,6 +13,7 @@ export const PLATFORMS = [
 export const USAGE_CATEGORIES = [
   "Design Studio",
   "Ecommerce",
+  "Wastage",
   "Others"
 ] as const;
 

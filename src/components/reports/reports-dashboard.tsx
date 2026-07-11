@@ -12,7 +12,8 @@ import { getCategorySeries, getDashboardStats, getPlatformSeries, getSupplierSum
 import type { AiUsage, CreditPurchase } from "@/lib/types";
 import { formatDate, formatNumber } from "@/lib/utils";
 
-type ReportType = "monthly" | "monthly-purchase" | "platform" | "date-range" | "supplier";
+type ReportType = "monthly" | "monthly-purchase" | "platform" | "date-range" | "supplier" | "wastage";
+const CREDITS_PER_IMAGE = 150;
 
 export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage[]; purchases?: CreditPurchase[] }) {
   const [reportType, setReportType] = useState<ReportType>("monthly");
@@ -36,7 +37,8 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
         reportType !== "date-range" ||
         ((!dateFrom || record.date >= dateFrom) && (!dateTo || record.date <= dateTo));
       const supplierOk = reportType !== "supplier" || !!record.supplier_requirements?.trim();
-      return searchOk && monthOk && platformOk && rangeOk && supplierOk;
+      const wastageOk = reportType !== "wastage" || Number(record.wastage || 0) > 0 || record.category === "Wastage";
+      return searchOk && monthOk && platformOk && rangeOk && supplierOk && wastageOk;
     });
   }, [records, search, month, platform, dateFrom, dateTo, reportType]);
 
@@ -59,6 +61,7 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
                 <SelectItem value="platform">Platform Report</SelectItem>
                 <SelectItem value="date-range">Date Range Report</SelectItem>
                 <SelectItem value="supplier">Supplier Report</SelectItem>
+                <SelectItem value="wastage">Wastage Report</SelectItem>
               </SelectContent>
             </Select>
             <div className="relative lg:col-span-2">
@@ -129,6 +132,9 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
         <ReportMetric label="Remaining Credits" value={stats.remainingCredits} />
         <ReportMetric label="Total Images" value={stats.totalImages} />
         <ReportMetric label="Total Styles" value={stats.totalStyles} />
+        <ReportMetric label="Wastage Images" value={stats.totalWastage} />
+        <ReportMetric label="Wastage Credits" value={stats.totalWastageCredits} />
+        <ReportMetric label="Wastage per Entry" value={stats.wastagePerEntry} />
         <ReportMetric label="Total Purchases" value={stats.totalPurchases} />
       </section>
 
@@ -143,6 +149,8 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
                 <th className="py-3">Category</th>
                 <th className="py-3">Styles</th>
                 <th className="py-3">Images</th>
+                <th className="py-3">Wastage</th>
+                <th className="py-3">Wastage Credits</th>
                 <th className="py-3">Credits Used</th>
               </tr>
             </thead>
@@ -152,6 +160,8 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
                   <td className="py-3 font-semibold">{item.category}</td>
                   <td className="py-3">{formatNumber(item.styles)}</td>
                   <td className="py-3">{formatNumber(item.images)}</td>
+                  <td className="py-3">{formatNumber(item.wastage)}</td>
+                  <td className="py-3">{formatNumber(item.wastage * CREDITS_PER_IMAGE)}</td>
                   <td className="py-3">{formatNumber(item.creditsUsed)}</td>
                 </tr>
               ))}
@@ -174,6 +184,8 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
                 <th className="py-3">Credits Purchased</th>
                 <th className="py-3">Images</th>
                 <th className="py-3">Styles</th>
+                <th className="py-3">Wastage</th>
+                <th className="py-3">Wastage Credits</th>
                 <th className="py-3">Credits / Image</th>
               </tr>
             </thead>
@@ -186,6 +198,8 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
                   <td className="py-3">{formatNumber(item.creditsPurchased)}</td>
                   <td className="py-3">{formatNumber(item.images)}</td>
                   <td className="py-3">{formatNumber(item.styles)}</td>
+                  <td className="py-3">{formatNumber(item.wastage)}</td>
+                  <td className="py-3">{formatNumber(item.wastage * CREDITS_PER_IMAGE)}</td>
                   <td className="py-3">{formatNumber(item.images ? item.creditsUsed / item.images : 0)}</td>
                 </tr>
               ))}
@@ -196,11 +210,13 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
 
       <Card>
         <CardHeader>
-          <CardTitle>{reportType === "supplier" ? "Supplier Requirements Summary" : "Report Records"}</CardTitle>
+          <CardTitle>{reportType === "supplier" ? "Supplier Requirements Summary" : reportType === "wastage" ? "Wastage Summary" : "Report Records"}</CardTitle>
         </CardHeader>
         <CardContent className="overflow-x-auto">
           {reportType === "supplier" ? (
             <SupplierTable suppliers={suppliers} />
+          ) : reportType === "wastage" ? (
+            <WastageTable records={filtered} />
           ) : (
             <RecordsTable records={filtered} />
           )}
@@ -212,10 +228,47 @@ export function ReportsDashboard({ records, purchases = [] }: { records: AiUsage
   );
 }
 
+function WastageTable({ records }: { records: AiUsage[] }) {
+  if (!records.length) return <EmptyState />;
+
+  return (
+    <table className="w-full min-w-[840px] text-sm">
+      <thead>
+        <tr className="border-b text-left text-muted-foreground">
+          <th className="py-3">Date</th>
+          <th className="py-3">Platform</th>
+          <th className="py-3">Category</th>
+          <th className="py-3">Description</th>
+          <th className="py-3">Images</th>
+          <th className="py-3">Styles</th>
+          <th className="py-3">Wastage</th>
+          <th className="py-3">Wastage Credits</th>
+        </tr>
+      </thead>
+      <tbody>
+        {records.map((record) => (
+          <tr key={record.id} className="border-b last:border-0">
+            <td className="py-3">{formatDate(record.date)}</td>
+            <td className="py-3 font-semibold">{record.platform}</td>
+            <td className="py-3">{record.category || "Custom"}</td>
+            <td className="max-w-sm truncate py-3">{record.description}</td>
+            <td className="py-3">{formatNumber(record.number_of_images)}</td>
+            <td className="py-3">{formatNumber(record.number_of_styles)}</td>
+            <td className="py-3">{formatNumber(record.wastage)}</td>
+            <td className="py-3">{formatNumber(Number(record.wastage || 0) * CREDITS_PER_IMAGE)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 function MonthlyPurchaseReport({ records, purchases }: { records: AiUsage[]; purchases: CreditPurchase[] }) {
   const allocation = useMemo(() => allocateMonthlyPurchaseUsage(purchases, records), [purchases, records]);
   const creditsPurchased = purchases.reduce((sum, purchase) => sum + Number(purchase.total_credits_purchased || 0), 0);
   const creditsUsed = records.reduce((sum, record) => sum + Number(record.credits_used || 0), 0);
+  const totalWastage = records.reduce((sum, record) => sum + Number(record.wastage || 0), 0);
+  const totalWastageCredits = totalWastage * CREDITS_PER_IMAGE;
   const allocatedUsed = Array.from(allocation.values()).reduce((sum, used) => sum + used, 0);
   const amountPaid = purchases.reduce((sum, purchase) => sum + Number(purchase.purchase_amount || 0), 0);
   const remainingCredits = creditsPurchased - allocatedUsed;
@@ -230,6 +283,8 @@ function MonthlyPurchaseReport({ records, purchases }: { records: AiUsage[]; pur
         <ReportMetric label="Total Amount Spent" value={amountPaid} />
         <ReportMetric label="Credits Purchased" value={creditsPurchased} />
         <ReportMetric label="Credits Used" value={creditsUsed} />
+        <ReportMetric label="Wastage Images" value={totalWastage} />
+        <ReportMetric label="Wastage Credits" value={totalWastageCredits} />
         <ReportMetric label="Remaining Credits" value={remainingCredits} />
       </section>
 
@@ -367,6 +422,8 @@ function RecordsTable({ records }: { records: AiUsage[] }) {
           <th className="py-3">Remaining</th>
           <th className="py-3">Images</th>
           <th className="py-3">Styles</th>
+          <th className="py-3">Wastage</th>
+          <th className="py-3">Wastage Credits</th>
         </tr>
       </thead>
       <tbody>
@@ -381,6 +438,8 @@ function RecordsTable({ records }: { records: AiUsage[] }) {
             <td className="py-3">{formatNumber(record.remaining_credits)}</td>
             <td className="py-3">{formatNumber(record.number_of_images)}</td>
             <td className="py-3">{formatNumber(record.number_of_styles)}</td>
+            <td className="py-3">{formatNumber(record.wastage)}</td>
+            <td className="py-3">{formatNumber(Number(record.wastage || 0) * CREDITS_PER_IMAGE)}</td>
           </tr>
         ))}
       </tbody>
@@ -403,6 +462,8 @@ function SupplierTable({
           <th className="py-3">Platform</th>
           <th className="py-3">Supplier Requirements</th>
           <th className="py-3">Description</th>
+          <th className="py-3">Wastage</th>
+          <th className="py-3">Wastage Credits</th>
           <th className="py-3">Credits Used</th>
         </tr>
       </thead>
@@ -413,6 +474,8 @@ function SupplierTable({
             <td className="py-3 font-semibold">{item.platform}</td>
             <td className="py-3">{item.supplier}</td>
             <td className="py-3">{item.description}</td>
+            <td className="py-3">{formatNumber(item.wastage)}</td>
+            <td className="py-3">{formatNumber(Number(item.wastage || 0) * CREDITS_PER_IMAGE)}</td>
             <td className="py-3">{formatNumber(item.creditsUsed)}</td>
           </tr>
         ))}

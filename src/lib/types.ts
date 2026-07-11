@@ -30,6 +30,7 @@ export type AiUsage = {
   description: string;
   number_of_styles: number;
   number_of_images: number;
+  wastage: number;
   credits_used: number;
   remaining_credits: number;
   supplier_requirements: string | null;

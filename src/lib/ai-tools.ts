@@ -26,7 +26,8 @@ export const AI_TOOL_LOGOS: Record<string, string> = {
 };
 
 function favicon(domain: string) {
-  return `https://${domain}/favicon.ico`;
+  void domain;
+  return "/favicon.png";
 }
 
 function tool(
@@ -153,19 +154,7 @@ export const DEFAULT_AI_TOOLS: AiTool[] = [
     recommended: true,
     rating: 4.8,
     popularity: 94,
-    alternatives: ["Firebase", "Supabase", "Netlify"]
-  }),
-  tool("firebase", "Firebase", "Database", "Google's app development platform for authentication, hosting, databases, analytics, and AI app features.", "firebase.google.com", "https://firebase.google.com/pricing", "https://firebase.google.com/docs", {
-    recommended: true,
-    rating: 4.7,
-    popularity: 93,
-    alternatives: ["Supabase", "Vercel", "Airtable AI"]
-  }),
-  tool("supabase", "Supabase", "Database", "Open-source backend platform for Postgres, auth, storage, edge functions, and AI-ready app backends.", "supabase.com", "https://supabase.com/pricing", "https://supabase.com/docs", {
-    recommended: true,
-    rating: 4.8,
-    popularity: 92,
-    alternatives: ["Firebase", "Vercel", "Airtable AI"]
+    alternatives: ["Netlify", "Cloudflare Pages", "GitHub Pages"]
   }),
   tool("midjourney", "Midjourney", "AI Image Generation", "Popular image generation platform known for expressive editorial, art, and campaign-quality visuals.", "midjourney.com", "https://docs.midjourney.com/hc/en-us/articles/27870484040333-Plans", "https://docs.midjourney.com/", {
     logo_url: AI_TOOL_LOGOS.midjourney,

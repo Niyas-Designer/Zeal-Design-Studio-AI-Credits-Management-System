@@ -23,6 +23,8 @@ export function RecentActivity({ records }: { records: AiUsage[] }) {
                 <th className="py-3 font-medium">Used</th>
                 <th className="py-3 font-medium">Images</th>
                 <th className="py-3 font-medium">Styles</th>
+                <th className="py-3 font-medium">Wastage</th>
+                <th className="py-3 font-medium">Wastage Credits</th>
               </tr>
             </thead>
             <tbody>
@@ -34,6 +36,8 @@ export function RecentActivity({ records }: { records: AiUsage[] }) {
                   <td className="py-3">{formatNumber(record.credits_used)}</td>
                   <td className="py-3">{formatNumber(record.number_of_images)}</td>
                   <td className="py-3">{formatNumber(record.number_of_styles)}</td>
+                  <td className="py-3">{formatNumber(record.wastage)}</td>
+                  <td className="py-3">{formatNumber(Number(record.wastage || 0) * 150)}</td>
                 </tr>
               ))}
             </tbody>

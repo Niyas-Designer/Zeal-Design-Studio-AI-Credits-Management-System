@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   AlertTriangle,
   CalendarDays,
@@ -15,7 +15,6 @@ import {
   ListChecks,
   Lock,
   LogOut,
-  Mail,
   Moon,
   Eye,
   EyeOff,
@@ -50,7 +49,7 @@ import { KpiCard } from "@/components/dashboard/kpi-card";
 import { RecentActivity } from "@/components/dashboard/recent-activity";
 import { AiStudioPage } from "@/components/ai-studio/ai-studio-page";
 import { ReportsDashboard } from "@/components/reports/reports-dashboard";
-import { getCategorySeries, getDailyActivity, getDashboardStats, getMonthlySeries, getPlatformSeries, getSupplierUsage } from "@/lib/analytics";
+import { getCategorySeries, getDailyActivity, getDashboardStats, getMonthlySeries, getPlatformSeries, getSupplierUsage, getWastageSummary } from "@/lib/analytics";
 import {
   deletePayment,
   deletePurchase,
@@ -66,11 +65,8 @@ import {
   savePurchase,
   saveUsage,
   setUserDisabled,
-  simulatePasswordReset,
   signIn,
-  signInWithGoogle,
   signOut,
-  signUp,
   subscribeToBusinessChanges,
   updateUserRole
 } from "@/lib/data-store";
@@ -78,11 +74,9 @@ import { PLATFORMS, SUPPLIERS, USAGE_CATEGORIES } from "@/lib/constants";
 import type { AiUsage, CreditLedgerEntry, CreditPurchase, InvoiceFile, Payment, PaymentMethod, Platform, Profile } from "@/lib/types";
 import {
   aiUsageSchema,
-  forgotPasswordSchema,
   loginSchema,
   paymentSchema,
   purchaseSchema,
-  signupSchema,
   type AiUsageFormValues,
   type PaymentFormValues,
   type PurchaseFormValues
@@ -105,7 +99,6 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const FULL_LOGO = "/logo-full.png";
 const MARK_LOGO = "/favicon.png";
-const APPLE_LOGO = "/apple-logo-black.svg";
 const IMAGES_PER_STYLE = 6;
 const CREDITS_PER_IMAGE = 150;
 const DEFAULT_PLATFORM_CREDIT_PACKS: Partial<Record<Platform, number>> = {
@@ -429,25 +422,17 @@ function AuthScreen({ onSignedIn }: { onSignedIn: (profile: Profile) => void }) 
 
 function LoginForm({ onSignedIn }: { onSignedIn: (profile: Profile) => void }) {
   const { toast } = useToast();
-  const [forgotOpen, setForgotOpen] = useState(false);
-  const [signupOpen, setSignupOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [capsLock, setCapsLock] = useState(false);
   const [shake, setShake] = useState(false);
-  const [remember, setRemember] = useState(false);
-  const [googleLoading, setGoogleLoading] = useState(false);
   const form = useForm<z.infer<typeof loginSchema>>({
     resolver: zodResolver(loginSchema),
-    defaultValues: { email: "", password: "" }
-  });
-  const forgotForm = useForm<z.infer<typeof forgotPasswordSchema>>({
-    resolver: zodResolver(forgotPasswordSchema),
-    defaultValues: { email: "" }
+    defaultValues: { password: "" }
   });
 
   async function onSubmit(values: z.infer<typeof loginSchema>) {
     try {
-      const profile = await signIn(values.email, values.password, remember);
+      const profile = await signIn("", values.password);
       toast({ title: "Login Successful", description: "Welcome back." });
       onSignedIn(profile);
     } catch (error) {
@@ -461,328 +446,41 @@ function LoginForm({ onSignedIn }: { onSignedIn: (profile: Profile) => void }) {
     }
   }
 
-  async function onForgot(values: z.infer<typeof forgotPasswordSchema>) {
-    try {
-      await simulatePasswordReset(values.email);
-      forgotForm.reset();
-      setForgotOpen(false);
-      toast({
-        title: "Password Reset Email Sent",
-        description: "Check your inbox to continue securely."
-      });
-    } catch (error) {
-      toast({
-        title: "Reset failed",
-        description: error instanceof Error ? error.message : "Unable to process reset.",
-        variant: "destructive"
-      });
-    }
-  }
-
-  async function onGoogle() {
-    try {
-      setGoogleLoading(true);
-      const profile = await signInWithGoogle(remember);
-      toast({ title: "Login Successful", description: "Signed in with Google." });
-      onSignedIn(profile);
-    } catch (error) {
-      toast({
-        title: "Google sign in failed",
-        description: error instanceof Error ? error.message : "Unable to start sign in.",
-        variant: "destructive"
-      });
-    } finally {
-      setGoogleLoading(false);
-    }
-  }
-
-  function onProviderUnavailable(provider: string) {
-    toast({
-      title: `${provider} sign in is not enabled`,
-      description: "Google authentication is ready. Add this provider in Firebase to activate it."
-    });
-  }
-
   return (
-    <>
-      <form className={cn("space-y-6", shake && "animate-shake")} onSubmit={form.handleSubmit(onSubmit)} noValidate>
-        <Field label="Email Address" error={form.formState.errors.email?.message}>
-          <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white px-[18px] text-[#111111] placeholder:text-[#9CA3AF] transition focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25 focus-visible:ring-offset-0" type="email" autoComplete="email" placeholder="name@company.com" {...form.register("email")} />
-        </Field>
-        <Field label="Password" error={form.formState.errors.password?.message}>
-          <div className="relative">
-            <Input
-              className="h-14 rounded-[14px] border-[#E5E5E5] bg-white px-[18px] pr-12 text-[#111111] placeholder:text-[#9CA3AF] transition focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25 focus-visible:ring-offset-0"
-              type={showPassword ? "text" : "password"}
-              autoComplete="current-password"
-              placeholder="Enter your password"
-              onKeyUp={(event) => setCapsLock(event.getModifierState("CapsLock"))}
-              {...form.register("password")}
-            />
-            <button
-              aria-label={showPassword ? "Hide password" : "Show password"}
-              className="absolute right-4 top-1/2 -translate-y-1/2 rounded-md text-[#666666] transition hover:text-[#111111] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]"
-              onClick={() => setShowPassword((value) => !value)}
-              type="button"
-            >
-              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
-          {capsLock ? (
-            <p className="mt-2 flex items-center gap-2 text-xs font-medium text-[#B45309]">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              Caps Lock is on
-            </p>
-          ) : null}
-        </Field>
-        <div className="flex items-center justify-between gap-4 text-sm leading-none">
-          <label className="flex cursor-pointer items-center gap-2 text-[#666666]">
-            <input
-              checked={remember}
-              className="h-4 w-4 rounded border-[#E5E5E5] accent-[#E10600]"
-              onChange={(event) => setRemember(event.target.checked)}
-              type="checkbox"
-            />
-            Remember Me
-          </label>
-          <button className="font-semibold text-[#E10600] transition hover:text-[#111111] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]" onClick={() => setForgotOpen(true)} type="button">
-            Forgot Password
+    <form className={cn("space-y-6", shake && "animate-shake")} onSubmit={form.handleSubmit(onSubmit)} noValidate>
+      <Field label="Local Password" error={form.formState.errors.password?.message}>
+        <div className="relative">
+          <Input
+            className="h-14 rounded-[14px] border-[#E5E5E5] bg-white px-[18px] pr-12 text-[#111111] placeholder:text-[#9CA3AF] transition focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25 focus-visible:ring-offset-0"
+            type={showPassword ? "text" : "password"}
+            autoComplete="current-password"
+            autoFocus
+            placeholder="Enter local password"
+            onKeyUp={(event) => setCapsLock(event.getModifierState("CapsLock"))}
+            {...form.register("password")}
+          />
+          <button
+            aria-label={showPassword ? "Hide password" : "Show password"}
+            className="absolute right-4 top-1/2 -translate-y-1/2 rounded-md text-[#666666] transition hover:text-[#111111] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]"
+            onClick={() => setShowPassword((value) => !value)}
+            type="button"
+          >
+            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
           </button>
         </div>
-        <Button className="h-14 w-full rounded-[14px] bg-[#E10600] font-bold text-white shadow-lg shadow-red-100 transition duration-300 hover:scale-[1.03] hover:bg-[#C70000] hover:shadow-xl hover:shadow-red-100 active:scale-[0.98]" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <Lock className="h-4 w-4" />}
-          Sign In
-        </Button>
-
-        <div className="flex items-center gap-4 pt-1">
-          <span className="h-px flex-1 bg-gradient-to-r from-transparent to-[#E5E5E5]" />
-          <span className="whitespace-nowrap text-[11px] font-medium text-[#9CA3AF]">or continue with</span>
-          <span className="h-px flex-1 bg-gradient-to-l from-transparent to-[#E5E5E5]" />
-        </div>
-
-        <div className="flex items-center justify-center gap-5">
-          <SocialIconButton
-            ariaLabel="Continue with Google"
-            disabled={form.formState.isSubmitting || googleLoading}
-            icon={googleLoading ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E10600]/20 border-t-[#E10600]" /> : <GoogleIcon />}
-            onClick={onGoogle}
-          />
-          <SocialIconButton
-            ariaLabel="Continue with Apple"
-            featured
-            icon={<img alt="" className="h-5 w-5 object-contain" src={APPLE_LOGO} />}
-            onClick={() => onProviderUnavailable("Apple")}
-          />
-          <SocialIconButton
-            ariaLabel="Continue with Facebook"
-            icon={<FacebookIcon />}
-            onClick={() => onProviderUnavailable("Facebook")}
-          />
-        </div>
-
-        <p className="pt-2 text-center text-sm text-[#6f6f6f]">
-          Don't have an account?{" "}
-          <button className="font-bold text-[#E10600] transition hover:text-[#111111] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600]" onClick={() => setSignupOpen(true)} type="button">
-            Create Account
-          </button>
-        </p>
-        <p className="text-center text-xs text-[#8a8a8a]">Secure authentication powered by Firebase.</p>
-      </form>
-
-      <Dialog open={forgotOpen} onOpenChange={setForgotOpen}>
-        <DialogContent className="border-[#EAEAEA] bg-white text-[#111111]">
-          <DialogHeader>
-            <DialogTitle>Forgot Password</DialogTitle>
-          </DialogHeader>
-          <form className="space-y-4" onSubmit={forgotForm.handleSubmit(onForgot)}>
-            <Field label="Email Address" error={forgotForm.formState.errors.email?.message}>
-              <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="email" placeholder="name@company.com" {...forgotForm.register("email")} />
-            </Field>
-            <div className="flex justify-end gap-2">
-              <DialogClose asChild>
-                <Button type="button" variant="outline">Cancel</Button>
-              </DialogClose>
-              <Button disabled={forgotForm.formState.isSubmitting}>
-                <Mail className="h-4 w-4" />
-                Send Reset Link
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      <SignupDialog open={signupOpen} onOpenChange={setSignupOpen} onSignedIn={onSignedIn} remember={remember} />
-    </>
-  );
-}
-
-function SignupDialog({
-  open,
-  onOpenChange,
-  onSignedIn,
-  remember
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSignedIn: (profile: Profile) => void;
-  remember: boolean;
-}) {
-  const { toast } = useToast();
-  const [googleLoading, setGoogleLoading] = useState(false);
-  const form = useForm<z.infer<typeof signupSchema>>({
-    resolver: zodResolver(signupSchema),
-    defaultValues: { full_name: "", email: "", password: "", confirm_password: "" }
-  });
-
-  async function onSubmit(values: z.infer<typeof signupSchema>) {
-    try {
-      await signUp(values.email, values.password, values.full_name);
-      form.reset();
-      onOpenChange(false);
-      toast({
-        title: "Account Created Successfully",
-        description: "A verification email has been sent. Verify your email, then sign in."
-      });
-    } catch (error) {
-      toast({
-        title: "Create account failed",
-        description: error instanceof Error ? error.message : "Unable to create account.",
-        variant: "destructive"
-      });
-    }
-  }
-
-  async function onGoogle() {
-    try {
-      setGoogleLoading(true);
-      const profile = await signInWithGoogle(remember);
-      onOpenChange(false);
-      toast({ title: "Account Created Successfully", description: "Signed in with Google." });
-      onSignedIn(profile);
-    } catch (error) {
-      toast({
-        title: "Google sign in failed",
-        description: error instanceof Error ? error.message : "Unable to continue with Google.",
-        variant: "destructive"
-      });
-    } finally {
-      setGoogleLoading(false);
-    }
-  }
-
-  function onProviderUnavailable(provider: string) {
-    toast({
-      title: `${provider} sign in is not enabled`,
-      description: "Google authentication is ready. Add this provider in Firebase to activate it."
-    });
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="border-[#EAEAEA] bg-white text-[#111111]">
-        <DialogHeader>
-          <DialogTitle>Create Account</DialogTitle>
-        </DialogHeader>
-        <form className="space-y-4" onSubmit={form.handleSubmit(onSubmit)} noValidate>
-          <Field label="Full Name" error={form.formState.errors.full_name?.message}>
-            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" autoComplete="name" {...form.register("full_name")} />
-          </Field>
-          <Field label="Email Address" error={form.formState.errors.email?.message}>
-            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="email" autoComplete="email" {...form.register("email")} />
-          </Field>
-          <Field label="Password" error={form.formState.errors.password?.message}>
-            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="password" autoComplete="new-password" {...form.register("password")} />
-          </Field>
-          <Field label="Confirm Password" error={form.formState.errors.confirm_password?.message}>
-            <Input className="h-14 rounded-[14px] border-[#E5E5E5] bg-white text-[#111111] focus-visible:border-[#E10600] focus-visible:ring-[#E10600]/25" type="password" autoComplete="new-password" {...form.register("confirm_password")} />
-          </Field>
-          <div className="flex justify-end gap-2 pt-2">
-            <DialogClose asChild>
-              <Button type="button" variant="outline">Cancel</Button>
-            </DialogClose>
-            <Button className="bg-[#E10600] hover:bg-[#C70000]" disabled={form.formState.isSubmitting}>
-              {form.formState.isSubmitting ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <UserPlus className="h-4 w-4" />}
-              Create Account
-            </Button>
-          </div>
-
-          <div className="flex items-center gap-4 py-1">
-            <span className="h-px flex-1 bg-gradient-to-r from-transparent to-[#E5E5E5]" />
-            <span className="whitespace-nowrap text-[11px] font-medium text-[#9CA3AF]">or continue with</span>
-            <span className="h-px flex-1 bg-gradient-to-l from-transparent to-[#E5E5E5]" />
-          </div>
-
-          <div className="flex items-center justify-center gap-5">
-            <SocialIconButton
-              ariaLabel="Continue with Google"
-              disabled={form.formState.isSubmitting || googleLoading}
-              icon={googleLoading ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#E10600]/20 border-t-[#E10600]" /> : <GoogleIcon />}
-              onClick={onGoogle}
-            />
-            <SocialIconButton
-              ariaLabel="Continue with Apple"
-              featured
-              icon={<img alt="" className="h-5 w-5 object-contain" src={APPLE_LOGO} />}
-              onClick={() => onProviderUnavailable("Apple")}
-            />
-            <SocialIconButton
-              ariaLabel="Continue with Facebook"
-              icon={<FacebookIcon />}
-              onClick={() => onProviderUnavailable("Facebook")}
-            />
-          </div>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function SocialIconButton({
-  ariaLabel,
-  disabled,
-  featured,
-  icon,
-  onClick
-}: {
-  ariaLabel: string;
-  disabled?: boolean;
-  featured?: boolean;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      aria-label={ariaLabel}
-      className={cn(
-        "grid h-9 w-12 place-items-center rounded-lg border border-[#EAEAEA] bg-white text-[#111111] shadow-sm transition duration-300 hover:-translate-y-0.5 hover:bg-[#F7F7F7] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#E10600] disabled:pointer-events-none disabled:opacity-60",
-        featured && "h-12 w-16 rounded-xl shadow-xl shadow-black/15 hover:bg-white"
-      )}
-      disabled={disabled}
-      onClick={onClick}
-      type="button"
-    >
-      {icon}
-    </button>
-  );
-}
-
-function GoogleIcon() {
-  return (
-    <svg aria-hidden="true" className="h-5 w-5" viewBox="0 0 24 24">
-      <path d="M21.6 12.23c0-.78-.07-1.53-.2-2.23H12v4.22h5.38a4.6 4.6 0 0 1-2 3.02v2.51h3.24c1.9-1.75 2.98-4.32 2.98-7.52Z" fill="#4285F4" />
-      <path d="M12 22c2.7 0 4.97-.9 6.62-2.45l-3.24-2.51c-.9.6-2.04.96-3.38.96-2.6 0-4.8-1.76-5.59-4.12H3.07v2.59A10 10 0 0 0 12 22Z" fill="#34A853" />
-      <path d="M6.41 13.88A6.01 6.01 0 0 1 6.1 12c0-.65.11-1.28.31-1.88V7.53H3.07A10 10 0 0 0 2 12c0 1.61.39 3.14 1.07 4.47l3.34-2.59Z" fill="#FBBC05" />
-      <path d="M12 6c1.47 0 2.78.51 3.82 1.5l2.87-2.87A9.61 9.61 0 0 0 12 2a10 10 0 0 0-8.93 5.53l3.34 2.59C7.2 7.76 9.4 6 12 6Z" fill="#EA4335" />
-    </svg>
-  );
-}
-
-function FacebookIcon() {
-  return (
-    <svg aria-hidden="true" className="h-5 w-5" viewBox="0 0 24 24">
-      <path d="M22 12.06C22 6.5 17.52 2 12 2S2 6.5 2 12.06C2 17.08 5.66 21.25 10.44 22v-7.03H7.9v-2.91h2.54V9.84c0-2.52 1.49-3.91 3.78-3.91 1.1 0 2.24.2 2.24.2v2.48h-1.26c-1.24 0-1.63.78-1.63 1.57v1.88h2.77l-.44 2.91h-2.33V22C18.34 21.25 22 17.08 22 12.06Z" fill="#1877F2" />
-      <path d="m15.89 14.97.44-2.91h-2.77v-1.88c0-.8.39-1.57 1.63-1.57h1.26V6.13s-1.14-.2-2.24-.2c-2.29 0-3.78 1.39-3.78 3.91v2.22H7.9v2.91h2.54V22a10.18 10.18 0 0 0 3.12 0v-7.03h2.33Z" fill="#FFFFFF" />
-    </svg>
+        {capsLock ? (
+          <p className="mt-2 flex items-center gap-2 text-xs font-medium text-[#B45309]">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Caps Lock is on
+          </p>
+        ) : null}
+      </Field>
+      <Button className="h-14 w-full rounded-[14px] bg-[#E10600] font-bold text-white shadow-lg shadow-red-100 transition duration-300 hover:scale-[1.03] hover:bg-[#C70000] hover:shadow-xl hover:shadow-red-100 active:scale-[0.98]" disabled={form.formState.isSubmitting}>
+        {form.formState.isSubmitting ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" /> : <Lock className="h-4 w-4" />}
+        Unlock Dashboard
+      </Button>
+      <p className="text-center text-xs text-[#8a8a8a]">Offline local mode. Session and data stay in this browser only.</p>
+    </form>
   );
 }
 
@@ -827,6 +525,7 @@ function DashboardPage({ profile }: { profile: Profile }) {
   const daily = getDailyActivity(records);
   const categories = getCategorySeries(records);
   const suppliers = getSupplierUsage(records);
+  const wastageSummary = getWastageSummary(records);
   const today = new Date().toISOString().slice(0, 10);
   const creditsAddedToday = ledger
     .filter((entry) => entry.created_at.slice(0, 10) === today && entry.credits_added > 0)
@@ -845,6 +544,9 @@ function DashboardPage({ profile }: { profile: Profile }) {
         <KpiCard title="Remaining Credits" value={stats.remainingCredits} icon={PiggyBank} />
         <KpiCard title="Total Styles Created" value={stats.totalStyles} icon={Layers} />
         <KpiCard title="Total Images Generated" value={stats.totalImages} icon={ImageIcon} />
+        <KpiCard title="Total Wastage Images" value={stats.totalWastage} icon={AlertTriangle} />
+        <KpiCard title="Wastage Credits" value={stats.totalWastageCredits} icon={TrendingDown} />
+        <KpiCard title="Wastage per Entry" value={Number(stats.wastagePerEntry.toFixed(2))} icon={ListChecks} />
         <KpiCard title="Total Entries" value={stats.totalEntries} icon={ListChecks} />
         <KpiCard title="Monthly Usage" value={stats.monthlyUsage} icon={CalendarDays} />
         <KpiCard title="Monthly Purchase" value={stats.monthlyPurchase} icon={Coins} />
@@ -864,6 +566,7 @@ function DashboardPage({ profile }: { profile: Profile }) {
       </section>
       <section className="mt-6 grid gap-6 xl:grid-cols-3">
         <SummaryList title="Top Categories" rows={categories.slice(0, 6).map((item) => [item.category, formatNumber(item.creditsUsed)])} />
+        <SummaryList title="Wastage Summary" rows={wastageSummary.slice(0, 6).map((item) => [item.label, formatNumber(item.wastage)])} />
         <SummaryList title="Top Suppliers" rows={suppliers.slice(0, 6).map((item) => [item.supplier, formatNumber(item.creditsUsed)])} />
         <SummaryList title="Latest Purchases" rows={purchases.slice(0, 6).map((item) => [`${item.platform} · ${item.invoice_number}`, formatNumber(item.total_credits_purchased)])} empty="No purchases yet." />
         <SummaryList
@@ -1905,7 +1608,7 @@ function UsagePage({ profile }: { profile: Profile }) {
         </CardContent>
       </Card>
       <DataTable
-        headers={["S.No", "Date", "Platform", "Category", "Purchased", "Used", "Remaining", "Styles", "Images", "Purpose", ""]}
+        headers={["S.No", "Date", "Platform", "Category", "Purchased", "Used", "Remaining", "Styles", "Images", "Wastage", "Wastage Credits", "Purpose", ""]}
         empty="No usage records yet."
         rows={filtered.map((record, index) => [
           index + 1,
@@ -1917,6 +1620,8 @@ function UsagePage({ profile }: { profile: Profile }) {
           formatNumber(record.remaining_credits),
           record.number_of_styles,
           record.number_of_images,
+          formatNumber(record.wastage),
+          formatNumber(Number(record.wastage || 0) * CREDITS_PER_IMAGE),
           record.description,
           <div className="flex gap-2" key={record.id}>
             <Button variant="outline" size="sm" onClick={() => { setEditing(record); setOpen(true); }}>Edit</Button>
@@ -1984,6 +1689,7 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
           description: record.description,
           number_of_styles: record.number_of_styles,
           number_of_images: record.number_of_images,
+          wastage: record.wastage,
           credits_used: record.credits_used,
           supplier_requirements: SUPPLIERS.includes(record.supplier_requirements as (typeof SUPPLIERS)[number])
             ? record.supplier_requirements as (typeof SUPPLIERS)[number]
@@ -1997,6 +1703,7 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
           description: "",
           number_of_styles: 0,
           number_of_images: 0,
+          wastage: 0,
           credits_used: 0,
           supplier_requirements: "Syad"
         }
@@ -2005,8 +1712,11 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
   const selectedCategory = form.watch("category");
   const purchasedCredits = Number(form.watch("buy_credits") || 0);
   const numberOfStyles = Number(form.watch("number_of_styles") || 0);
+  const wastageImages = Number(form.watch("wastage") || 0);
   const totalImages = numberOfStyles * IMAGES_PER_STYLE;
-  const creditsUsed = totalImages * CREDITS_PER_IMAGE;
+  const imageCreditsUsed = totalImages * CREDITS_PER_IMAGE;
+  const wastageCredits = wastageImages * CREDITS_PER_IMAGE;
+  const creditsUsed = imageCreditsUsed + wastageCredits;
   const previousPlatformCreditsUsed = records
     .filter((item) => item.id !== record?.id && item.user_id === (record?.user_id ?? currentUser.id) && item.platform === selectedPlatform)
     .reduce((sum, item) => sum + Number(item.credits_used || 0), 0);
@@ -2083,10 +1793,13 @@ function UsageForm({ currentUser, record, records, purchases, onDone }: { curren
         </Select>
       </Field>
       <Field label="Number of Styles" error={form.formState.errors.number_of_styles?.message}><Input type="number" min="0" {...form.register("number_of_styles")} /></Field>
+      <Field label="Wastage" error={form.formState.errors.wastage?.message}><Input type="number" min="0" step="0.01" {...form.register("wastage")} /></Field>
       <div className="grid gap-3 rounded-md border bg-muted/35 p-4 sm:col-span-2 sm:grid-cols-3">
         <CalculationItem label="Purchased Credits" value={purchasedCredits} />
         <CalculationItem label="Total Images" value={totalImages} />
-        <CalculationItem label="Credits Used" value={creditsUsed} />
+        <CalculationItem label="Image Credits Used" value={imageCreditsUsed} />
+        <CalculationItem label="Wastage Credits" value={wastageCredits} />
+        <CalculationItem label="Total Credits Used" value={creditsUsed} />
         <CalculationItem label="Remaining Credits" value={Math.max(remainingCredits, 0)} danger={insufficientCredits} />
         <div className="sm:col-span-3">
           <div className="mb-2 flex items-center justify-between text-xs font-medium text-muted-foreground">
